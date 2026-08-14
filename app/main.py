@@ -1,4 +1,4 @@
-"""AI 辅助评审系统 — FastAPI 应用入口。
+"""AI 智能评标系统 — FastAPI 应用入口。
 
 P0.3 阶段：
 - lifespan 启动时校验四库连通性 + DeepSeek API key，任一硬依赖失败则 exit(1)
@@ -102,7 +102,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
-    description="AI 辅助评审系统：专家智能匹配、回避检测、标书 RAG 检索、AI 辅助打分、围串标检测",
+    description="AI 智能评标系统：专家智能匹配、回避检测、标书 RAG 检索、AI 辅助打分、围串标检测",
     lifespan=lifespan,
 )
 

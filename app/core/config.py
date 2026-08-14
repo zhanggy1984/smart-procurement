@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     )
 
     # ========== 运行模式 ==========
-    app_name: str = "AI 辅助评审系统"
+    app_name: str = "AI 智能评标系统"
     app_version: str = "0.1.0"
     datasource_mode: str = "synthetic"  # synthetic | real
     debug: bool = False

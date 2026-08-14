@@ -1,7 +1,7 @@
 [project]
 name = "smart-procurement"
 version = "0.1.0"
-description = "AI辅助评审系统：专家智能匹配、回避检测、标书RAG检索、AI辅助打分、围串标检测"
+description = "AI智能评标系统：专家智能匹配、回避检测、标书RAG检索、AI辅助打分、围串标检测"
 authors = [{ name = "smart-procurement" }]
 readme = "README.md"
 requires-python = ">=3.11,<3.13"

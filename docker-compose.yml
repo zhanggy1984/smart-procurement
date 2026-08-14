@@ -1,5 +1,5 @@
 # ============================================================
-# AI 辅助评审系统 — 开发环境编排（P0.2：5 中间件）
+# AI 智能评标系统 — 开发环境编排（P0.2：5 中间件）
 # MySQL / Neo4j / Milvus / MinIO / Redis
 # P0.3 追加 FastAPI App / arq Worker / BGE-M3 应用容器
 # 一键启动: docker compose up -d

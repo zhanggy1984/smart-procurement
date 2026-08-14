@@ -3,7 +3,7 @@
     <el-header class="app-header">
       <div class="brand">
         <el-icon :size="22"><DataAnalysis /></el-icon>
-        <span>AI 辅助评审系统</span>
+        <span>AI 智能评标系统</span>
       </div>
 
       <el-menu

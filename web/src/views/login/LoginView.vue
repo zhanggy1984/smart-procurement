@@ -3,7 +3,7 @@
     <el-card class="login-card">
       <div class="login-brand">
         <el-icon :size="40" color="#1f3864"><DataAnalysis /></el-icon>
-        <h2>AI 辅助评审系统</h2>
+        <h2>AI 智能评标系统</h2>
         <p class="subtitle">专家匹配 · AI 辅助评标 · 围串标检测</p>
       </div>
 
