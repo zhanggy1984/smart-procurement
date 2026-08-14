@@ -1,0 +1,11 @@
+# 统一换行符：仓库内存储 LF，检出时按平台自动转换
+* text=auto
+
+# 对换行敏感的文本文件强制 LF
+*.py text eol=lf
+*.js text eol=lf
+*.ts text eol=lf
+*.vue text eol=lf
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf

@@ -1,0 +1,5 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+# 模型加载依赖（骨架阶段即安装，避免 P2 再触发大镜像构建）
+sentence-transformers>=3.0
+torch>=2.2

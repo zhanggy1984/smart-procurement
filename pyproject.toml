@@ -1,0 +1,91 @@
+[project]
+name = "smart-procurement"
+version = "0.1.0"
+description = "AI辅助评审系统：专家智能匹配、回避检测、标书RAG检索、AI辅助打分、围串标检测"
+authors = [{ name = "smart-procurement" }]
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = { text = "MIT" }
+dependencies = [
+    # ==== Web 框架 ====
+    # fastapi 0.141+ 与 pydantic 2.13 存在 _compat 重构兼容问题（PYDANTIC_V2 import 失败），
+    # 锁定 <0.116 保证稳定。poetry lock 重新解析时不会漂回 0.141。
+    "fastapi>=0.115,<0.116",
+    "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
+    # ==== 配置与校验 ====
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "email-validator>=2.1",
+    # ==== 数据层 ====
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncmy>=0.2.9",
+    "alembic>=1.13",
+    "neo4j>=5.20",
+    "pymilvus>=2.4,<2.5",
+    "minio>=7.2",
+    "redis>=5.0",
+    # ==== 任务队列 ====
+    "arq>=0.26",
+    # ==== AI ====
+    "openai>=1.40",
+    "tiktoken>=0.7",
+    # ==== 文档解析 ====
+    "pdfplumber>=0.11",
+    "python-docx>=1.1",
+    # ==== 围串标批量相似度 ====
+    "faiss-cpu>=1.8",
+    # ==== 安全 ====
+    "cryptography>=42.0",
+    "bcrypt>=4.0",
+    "pyjwt>=2.8",
+    # ==== 通用 ====
+    "httpx>=0.27",
+    "structlog>=24.1",
+    # setuptools>=82 移除了 pkg_resources 模块，而 pymilvus 2.4.15 依赖它
+    # （lock 依赖声明 setuptools>69 无上限，会漂到 84.0.0 导致容器内 import 失败）
+    "setuptools>=70,<82",
+    # ==== 合成数据生成 ====
+    "networkx>=3.3",
+    "faker>=26.0",
+    "mimesis>=18.0",
+    "reportlab>=4.2",
+    "openpyxl (>=3.1.5,<4.0.0)",
+]
+
+[project.optional-dependencies]
+# 开发/测试依赖: poetry install -E dev
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "vcrpy>=6.0",
+    "ruff>=0.5",
+]
+# BGE-M3 独立服务依赖（仅 bge-m3 容器需要，避免主应用引入 torch）: poetry install -E bge-m3
+bge-m3 = [
+    "sentence-transformers>=3.0",
+    "torch>=2.2",
+]
+# E2E 测试依赖
+e2e = [
+    "playwright>=1.45",
+]
+
+[tool.poetry]
+packages = [{ include = "app" }]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# 集成测试（tests/integration）通过 conftest 的 pytest_collection_modifyitems
+# 统一标记 session loop_scope（pytest-asyncio 0.24 仅支持 fixture_loop_scope
+# ini 项，测试函数 loop 需 hook 控制）。
+testpaths = ["tests"]

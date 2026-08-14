@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# 环境变量（含密钥，绝不入库）
+.env
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# 数据目录（Docker 卷挂载的中间件数据）
+data/
+
+# 前端（源码在 web/，frontend/ 为空目录）
+frontend/node_modules/
+frontend/dist/
+web/node_modules/
+web/dist/
+web/.benchmarks/
+web/.tmp_*.png
+
+# 本地工具 / 缓存（不提交）
+.codegraph/
+.benchmarks/
+.mypy_cache/
+.ruff_cache/
+
+# Claude Code 本地配置（整体忽略）
+.claude/
+
+# 内部开发文档（不提交）
+solution.md
+task.md
+
+# 日志
+*.log
+logs/

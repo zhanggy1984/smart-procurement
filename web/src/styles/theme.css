@@ -1,0 +1,76 @@
+/* 全局主题：藏青蓝政务严肃风
+   覆盖 Element Plus CSS 变量，一次改动全站观感统一。
+   主色 #1F3864（藏青蓝）+ 灰蓝背景 #EEF1F5。 */
+
+:root {
+  /* ---- 主色系 ---- */
+  --el-color-primary: #1f3864;
+  --el-color-primary-light-3: #5a6d8c;
+  --el-color-primary-light-5: #8f9cb1;
+  --el-color-primary-light-7: #c4cbd8;
+  --el-color-primary-light-8: #d9dde6;
+  --el-color-primary-light-9: #eceef3;
+  --el-color-primary-dark-2: #172e52;
+
+  /* ---- 背景 ---- */
+  --el-bg-color: #ffffff;
+  --el-bg-color-page: #eef1f5;
+  --el-fill-color-lighter: #eef1f5;
+
+  /* ---- 文字 ---- */
+  --el-text-color-primary: #1f2d3d;
+  --el-text-color-regular: #303c4e;
+  --el-text-color-secondary: #5c6b7e;
+  --el-text-color-placeholder: #8a97a8;
+
+  /* ---- 圆角 / 字体 ---- */
+  --el-border-radius-base: 4px;
+  --el-font-family: "Microsoft YaHei", "PingFang SC", "Helvetica Neue", Arial, sans-serif;
+
+  /* ---- 表格表头庄重化（深藏青底白字） ---- */
+  --el-table-header-bg-color: #1f3864;
+  --el-table-header-text-color: #ffffff;
+  --el-table-border-color: #e4e7ed;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  background: #eef1f5;
+  color: #1f2d3d;
+  font-family: var(--el-font-family);
+}
+
+/* ---- 通用页头：标题 + 副标题 + 操作区 ---- */
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 0 14px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid #e4e7ed;
+}
+.page-header-title {
+  font-size: 17px;
+  font-weight: 700;
+  color: #1f3864;
+  margin: 0;
+  letter-spacing: 0.5px;
+}
+.page-header-desc {
+  font-size: 12px;
+  color: #5c6b7e;
+  margin: 4px 0 0;
+}
+.page-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 深色表头上白字加粗，提升可读性 */
+.el-table th.el-table__cell {
+  font-weight: 600;
+}

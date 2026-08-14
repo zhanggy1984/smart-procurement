@@ -1,0 +1,15 @@
+# 镜像内排除本地数据与缓存
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+data/
+tests/
+scripts/
+.env
+!.env.example
+frontend/
+node_modules/
