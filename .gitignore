@@ -39,10 +39,6 @@ web/.tmp_*.png
 # Claude Code 本地配置（整体忽略）
 .claude/
 
-# 内部开发文档（不提交）
-solution.md
-task.md
-
 # 日志
 *.log
 logs/
