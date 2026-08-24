@@ -11,6 +11,7 @@ seq 递增（P3.6 断流续推用 Last-Event-ID）。
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 
@@ -21,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.llm.deepseek_client import CircuitOpenError, get_client
 from app.ai.llm.prompts import build_score_prompt
 from app.ai.rag.retriever import retrieve_with_meta
+from app.core.config import settings
 from app.core.crypto import generate_id
 from app.core.sse import sse_event
 from app.models.bid_document import BidDocument, BidStatus
@@ -149,6 +151,15 @@ async def stream_score(
         raise ReviewNotFoundError(f"评审关联数据缺失: review={review_id}")
 
     seq = 0
+    # 契约 meta 首帧（评测 §5.1）：每个 SSE 流统一透出 agent 元信息
+    yield sse_event("meta", {
+        "agent": "smart-procurement",
+        "model": settings.deepseek_model,
+        "interface": "POST /reviews/{review_id}/score",
+        "contract_version": "1.0",
+        "git_sha": "",
+        "knowledge_version": "",
+    }, seq := seq + 1)
     # 报价维度：纯公式（零延迟、可审计，不走 AI）
     if dim.name == PRICE_DIMENSION_NAME:
         lot_bids = (
@@ -164,7 +175,11 @@ async def stream_score(
         )
         yield sse_event("thinking", {"stage": "PRICE_CALC"}, seq := seq + 1)
         yield sse_event("price_calc", calc, seq := seq + 1)
-        yield sse_event("done", {}, seq := seq + 1)
+        # done 带结构化分数（契约 §5.1 扩展：评分任务显式透出，评测端不依赖正则提取）
+        yield sse_event("done", {
+            "content": calc.get("formula", ""),
+            "score": calc.get("result", {}).get("calculatedScore"),
+        }, seq := seq + 1)
         return
 
     # ==================== AI 评分 ====================
@@ -174,15 +189,27 @@ async def stream_score(
         query, lot_id=bid.lot_id, bid_id=bid.bid_id, dimension=dim, top_k=5
     )
 
-    # 检索结果 → source 事件（证据溯源）
+    # 检索结果 → source 事件（证据溯源，旧前端）+ 契约 tool_call（评测端观测检索动作）
+    retrievals: list[dict] = []
     for r in results:
         if r.source in ("vector", "keyword"):
+            retrievals.append({
+                "chunk_id": r.chunk_id, "chapter_title": r.chapter_title,
+                "score": round(r.score, 4),
+            })
             yield sse_event(
                 "source",
                 {"chunk_id": r.chunk_id, "content": r.content[:500],
                  "chapter_title": r.chapter_title, "score": round(r.score, 4)},
                 seq := seq + 1,
             )
+    yield sse_event("tool_call", {
+        "id": str(time.time_ns()),
+        "name": "knowledge_retrieval",
+        "args": {"query": query[:50]},
+        "result": retrievals,
+        "status": "success",
+    }, seq := seq + 1)
 
     # 无可用依据 → 拒答事件（P2.4 降级提示），不调 LLM
     if hint is not None and not results:
@@ -209,16 +236,28 @@ async def stream_score(
         structured_data=bid.structured_data,
     )
 
-    # LLM 流式评分
+    # LLM 流式评分。thought 增量即答案正文（评分理由+分数一体，非独立 reasoner 模式），
+    # 契约 reasoning/answer 同 delta 双发（评测端两维度都有正文、TTFT=首个 token），thought 保留旧前端。
+    # 7.4 cache 字段：DeepSeek 响应带 prompt_cache_hit/miss_tokens，累加透传评测平台按命中价计成本
+    total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+                   "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 0}
     yield sse_event("thinking", {"stage": "REASONING"}, seq := seq + 1)
     full_text = ""
     try:
-        async for delta in get_client().chat_stream(prompt, max_tokens=2048):
+        async for delta, u in get_client().chat_stream(prompt, max_tokens=2048):
+            if u:
+                for _k in total_usage:
+                    total_usage[_k] += u.get(_k, 0) or 0
+            if not delta:
+                continue
             full_text += delta
+            yield sse_event("reasoning", {"delta": delta}, seq := seq + 1)
+            yield sse_event("answer", {"delta": delta}, seq := seq + 1)
             yield sse_event("thought", {"delta": delta}, seq := seq + 1)
     except CircuitOpenError:
         yield sse_event("thinking", {"stage": "LLM_DOWN"}, seq := seq + 1)
-        yield sse_event("done", {}, seq := seq + 1)
+        yield sse_event("usage", total_usage, seq := seq + 1)
+        yield sse_event("done", {"content": full_text}, seq := seq + 1)
         return
 
     # 解析分数（prompt 要求末行 `分数: X`，_RE_TOTAL_SCORE 兜底）→ score 事件
@@ -229,7 +268,9 @@ async def stream_score(
         {"score": score_val, "comment": full_text[:2000]},
         seq := seq + 1,
     )
-    yield sse_event("done", {}, seq := seq + 1)
+    yield sse_event("usage", total_usage, seq := seq + 1)
+    # done 带结构化分数（§5.1 扩展：评测端直接取 score，不依赖正则；解析不到为 null）
+    yield sse_event("done", {"content": full_text, "score": score_val}, seq := seq + 1)
 
 
 # ==================== P3.4：暂存 / 提交 / 锁定 ====================

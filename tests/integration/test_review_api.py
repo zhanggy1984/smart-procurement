@@ -113,12 +113,16 @@ async def test_stream_score_price_formula(client, pm_headers, exp_headers, lot_f
         assert sr.status_code == 200
         lines = [ln async for ln in sr.aiter_lines()]
     events = _parse_sse(lines)
-    assert [e["event"] for e in events] == ["thinking", "price_calc", "done"]
+    # 契约改造后 meta 为首帧（§5.1）
+    assert [e["event"] for e in events] == ["meta", "thinking", "price_calc", "done"]
     calc = next(e["data"]["result"] for e in events if e["event"] == "price_calc")
     # 基准价 = (100+120+80)/3 = 100，报价 100 → 满分
     assert calc["calculatedScore"] == 20.0
     assert calc["basePrice"] == 100.0
-    assert [e["id"] for e in events] == [1, 2, 3]  # seq 递增（断流续推用）
+    assert [e["id"] for e in events] == [1, 2, 3, 4]  # seq 递增（断流续推用）
+    # done 显式结构化分数（评测端不依赖正则提取）
+    done = next(e for e in events if e["event"] == "done")
+    assert done["data"]["score"] == 20.0
 
 
 @pytest.mark.asyncio
@@ -198,8 +202,9 @@ async def test_stream_chat_with_fake_llm(client, pm_headers, exp_headers, lot_fa
     fake.circuit_state = "CLOSED"
 
     async def _stream(prompt, max_tokens=1024):
-        yield "第一句"
-        yield "第二句"
+        # 契约改造后 yield (delta, usage_or_None)
+        yield "第一句", None
+        yield "第二句", {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
 
     fake.chat_stream = _stream
     with patch("app.api.v1.reviews.get_client", return_value=fake):
@@ -209,9 +214,13 @@ async def test_stream_chat_with_fake_llm(client, pm_headers, exp_headers, lot_fa
             lines = [ln async for ln in sr.aiter_lines()]
     events = _parse_sse(lines)
     names = [e["event"] for e in events]
-    assert names[0] == "thinking"
+    assert names[0] == "meta"  # 契约 meta 首帧
     assert names[-1] == "done"
+    # 契约双发：每个 delta 同时透出 reasoning/answer，旧 thought 保留
     assert names.count("thought") == 2  # 两个 delta
+    assert names.count("reasoning") == 2
+    assert names.count("answer") == 2
+    assert "usage" in names  # usage 事件（聚合 mock 的 usage）
     # 对话历史已落库
     from sqlalchemy import text
 

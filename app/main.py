@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
+from app.api import contracts
 from app.api.v1 import api_v1_router
 from app.core import database, logging, milvus, neo4j
 from app.core.config import settings
@@ -111,6 +112,8 @@ app.add_middleware(RequestIDMiddleware)
 
 # 业务路由（/api/v1 前缀）
 app.include_router(api_v1_router)
+# 标准契约清单端点（统一 GET /api/contracts，平台脚手架发现用）
+app.include_router(contracts.router, prefix="/api")
 
 
 @app.get("/health/live", tags=["health"], summary="存活探针")

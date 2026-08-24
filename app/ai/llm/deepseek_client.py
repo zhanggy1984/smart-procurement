@@ -125,9 +125,11 @@ class DeepSeekClient:
         *,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
-    ) -> AsyncIterator[str]:
-        """SSE 流式调用，逐段 yield 文本增量。熔断 OPEN 抛 CircuitOpenError。
+    ) -> AsyncIterator[tuple[str, dict | None]]:
+        """SSE 流式调用，逐段 yield (文本增量, usage_or_None)。熔断 OPEN 抛 CircuitOpenError。
 
+        stream_options.include_usage=True 时，最后一个 chunk 携带 usage（choices 为空），
+        yield ("", usage_dict)；调用方按流聚合后透出契约 usage 事件。
         temperature/max_tokens 缺省时读系统配置（P6.2，llm.temperature/max_tokens），
         显式传参覆盖配置。重试仅发生在真正发送请求前失败/响应阶段（流开始前）；
         已开始流式输出后中断不再重试（避免重复输出），直接抛异常由调用方/SSE 端处理。
@@ -148,10 +150,15 @@ class DeepSeekClient:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     stream=True,
+                    stream_options={"include_usage": True},
                 )
                 async for chunk in stream:
+                    if chunk.usage:
+                        # include_usage 的最后一个 chunk：usage 非空、choices 为空
+                        yield "", chunk.usage.model_dump()
+                        continue
                     if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                        yield chunk.choices[0].delta.content
+                        yield chunk.choices[0].delta.content, None
                 await self._circuit.record_success()
                 return
             except CircuitOpenError:

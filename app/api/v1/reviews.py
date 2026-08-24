@@ -27,7 +27,9 @@ from app.services import review_service as svc
 from app.services import conversation_service as conversation
 from app.ai.llm.deepseek_client import get_client
 from app.ai.llm.prompts import build_chat_prompt
+from app.ai.rag.retriever import retrieve_with_meta
 from app.core.sse import sse_event
+from app.models.bid_document import BidDocument
 
 logger = structlog.get_logger(__name__)
 
@@ -241,6 +243,16 @@ async def stream_chat(
             if review is None or review.expert_id != expert_id:
                 yield sse_event("error", {"detail": "评审记录不存在或非本人任务"}, 0)
                 return
+            # 检索标书证据注入：chat 首问无历史上下文，缺依据 LLM 会编造通用方案
+            # （评测 run 165 根因）；dimension=None 走纯向量召回，避免维度关键词偏置。
+            bid = await s.get(BidDocument, review.bid_id)
+            chunks: list[str] = []
+            if bid is not None:
+                results, _hint = await retrieve_with_meta(
+                    body.question, lot_id=bid.lot_id, bid_id=bid.bid_id,
+                    dimension=None, top_k=8,
+                )
+                chunks = [r.content for r in results if r.source in ("vector", "keyword")]
             await conversation.add_message(
                 s, review_id=review_id, dimension_id=review.dimension_id,
                 role="user", content=body.question,
@@ -250,14 +262,34 @@ async def stream_chat(
             )
             prompt = build_chat_prompt(
                 role_context="你是标书评审专家助手，结合标书内容与当前评审上下文回答专家的追问。",
-                context=context, history=[], question=body.question,
+                context=context, history=[], question=body.question, chunks=chunks,
             )
             seq = 1
-            yield sse_event("thinking", {"stage": "CHAT"}, seq)
+            # 契约 meta 首帧（评测 §5.1）
+            yield sse_event("meta", {
+                "agent": "smart-procurement",
+                "model": settings.deepseek_model,
+                "interface": "POST /reviews/{review_id}/chat",
+                "contract_version": "1.0",
+                "git_sha": "",
+                "knowledge_version": "",
+            }, seq := seq + 1)
+            yield sse_event("thinking", {"stage": "CHAT"}, seq := seq + 1)
             full = ""
+            # 7.4 cache 字段：DeepSeek 响应带 prompt_cache_hit/miss_tokens，累加透传评测平台按命中价计成本
+            total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+                           "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 0}
             try:
-                async for delta in get_client().chat_stream(prompt, max_tokens=1024):
+                # 对话回答即答案正文：契约 reasoning/answer 同 delta 双发，thought 保留旧前端
+                async for delta, u in get_client().chat_stream(prompt, max_tokens=1024):
+                    if u:
+                        for _k in total_usage:
+                            total_usage[_k] += u.get(_k, 0) or 0
+                    if not delta:
+                        continue
                     full += delta
+                    yield sse_event("reasoning", {"delta": delta}, seq := seq + 1)
+                    yield sse_event("answer", {"delta": delta}, seq := seq + 1)
                     yield sse_event("thought", {"delta": delta}, seq := seq + 1)
             finally:
                 if full.strip():
@@ -268,7 +300,8 @@ async def stream_chat(
                     await conversation.maybe_summarize(
                         s, review_id=review_id, dimension_id=review.dimension_id
                     )
-            yield sse_event("done", {}, seq := seq + 1)
+            yield sse_event("usage", total_usage, seq := seq + 1)
+            yield sse_event("done", {"content": full}, seq := seq + 1)
 
     return StreamingResponse(
         gen(),
