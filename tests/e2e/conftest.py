@@ -31,6 +31,8 @@ PREFIX = "E2E"
 MYSQL_DSN = os.environ.get(
     "MYSQL_URL", "mysql+asyncmy://smart:smart_procurement_dev@localhost:3306/smart_procurement"
 )
+# 宿主 MySQL 端口（同机多栈冲突时经 .env 重映射为 13306，故参数化）
+MYSQL_PORT = int(os.environ.get("MYSQL_PORT", "3306"))
 
 NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.environ.get("NEO4J_USER", "neo4j")
@@ -95,7 +97,7 @@ def _sql(sql: str, params: dict | list | None = None) -> list[tuple]:
         else:
             sql2, exec_params = sql, (tuple(params) if params else ())
 
-        conn = await connect(host="localhost", port=3306, user="root",
+        conn = await connect(host="localhost", port=MYSQL_PORT, user="root",
                              password=os.environ.get("MYSQL_ROOT_PASSWORD", "root_dev_pass"),
                              database="smart_procurement", charset="utf8mb4")
         try:
@@ -345,7 +347,9 @@ class Api:
     def __init__(self, user_id: str, username: str, password: str = PASSWORD):
         import httpx
 
-        self._client = httpx.Client(base_url=BASE_URL, timeout=60)
+        # trust_env=False：本机 WinINET 系统代理(127.0.0.1:15490)会被 httpcore 读走，
+        # 劫持 localhost:18080 请求致 502/10054；E2E 直连本地部署，禁用系统代理。
+        self._client = httpx.Client(base_url=BASE_URL, timeout=60, trust_env=False)
         r = self._client.post("/api/v1/auth/login", json={"username": username, "password": password})
         assert r.status_code == 200, f"登录失败 {username}: {r.text}"
         self.token = r.json()["access_token"]

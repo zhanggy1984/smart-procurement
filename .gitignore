@@ -39,6 +39,9 @@ web/.tmp_*.png
 # Claude Code 本地配置（整体忽略）
 .claude/
 
+# 验证产物（浏览器 E2E / 手测截图）
+.verify_out/
+
 # 日志
 *.log
 logs/
