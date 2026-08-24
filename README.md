@@ -87,8 +87,10 @@
 
 **维度感知注入**：检索时传入评分维度，把该维度的评分标准术语注入关键词路，让召回"跟着评分标准走"。P7.5 基准验证：**Recall@5=1.000、MRR=1.000、拒答 100%、维度感知提升 +11%**。
 
-### 4. SSE 流式 AI 评分 + 断流续推
-评审工作台用 SSE 流推送完整过程：`RETRIEVING → 5 条证据片段 → REASONING → thought 逐字流 → score`。专家看到的是"AI 依据哪段标书原文打了多少分"，而非一句"25 分"。断网重连通过 `Last-Event-ID` 从 Redis 缓存续推已发帧。P7.6 实测：**首 token 0.6s、完整流 5.6s**。
+### 4. SSE 标准契约流式 AI 评分 + 断流续推
+评审/对话 SSE 事件流统一为标准契约（评测 §5.1）：`meta → thinking → source(RAG 证据) → tool_call(knowledge_retrieval) → reasoning/answer/thought 增量 → score → usage → done`，全事件 data 内置 ts（unix ms）时间戳，`done` 显式携带结构化 `score`（评测端不依赖正则提取）。专家看到的是"AI 依据哪段标书原文打了多少分"，而非一句"25 分"。断网重连通过 `Last-Event-ID` 从 Redis 缓存续推已发帧。P7.6 实测：**首 token 0.6s、完整流 5.6s**。
+
+另有公开的 **`GET /api/contracts`** 契约清单端点（无鉴权）：声明本 agent 的 LLM 评测接口（chat / score，均 SSE 流式）与场景清单（技术方案 / 报价 / 利益冲突 / 围串标），供评测平台接口自动发现。
 
 ### 5. 断路器 + 三级降级矩阵
 AI 不可用时系统不是报错，而是按级优雅降级：
@@ -131,7 +133,7 @@ graph TB
         NGINX["nginx :8080<br/>静态服务 + /api/v1 反代 + SSE 关闭缓冲"]
     end
     subgraph 应用层
-        API["FastAPI App :8000<br/>REST API + SSE 流式"]
+        API["FastAPI App :8002<br/>REST API + SSE 流式"]
         WK["arq Worker<br/>outbox 消费 / 标书解析 / 归档"]
     end
     subgraph AI 服务
@@ -202,8 +204,10 @@ cp .env.example .env
 docker compose up -d
 # 等待各容器 healthy（首次含镜像构建与 BGE-M3 模型下载，约 5-15 分钟）
 docker compose ps                 # 全部 Up + healthy
-curl localhost:8000/health/ready  # {"status":"ok","mysql":"ok","neo4j":"ok",...}
+curl localhost:8002/health/ready  # {"status":"ok","mysql":"ok","neo4j":"ok",...}
 ```
+
+> **端口说明**：宿主端口已参数化（`SP_APP_PORT` API 默认 **8002**、`WEB_PORT` 前端默认 **8080**、`MYSQL_PORT`/`MILVUS_PORT`/`REDIS_PORT`/`BGE_M3_PORT`）。同机跑多套栈端口冲突时，在 `.env` 覆盖对应变量即可；容器内部服务名互连不受影响。实际访问端口以 `.env` 为准。
 
 ### 第 3 步：初始化数据（建表 + 合成数据 + 演示场景）
 
@@ -249,7 +253,9 @@ SUP-012/013 同一实控人（`SAME_CONTROLLER`）且标书文本高相似（FAI
 smart-procurement/
 ├── app/                    # 后端源码（FastAPI）
 │   ├── main.py             # 应用入口 + 生命周期（中间件健康检查）
-│   ├── api/v1/             # REST 路由（auth/projects/bids/matching/reviews/...）
+│   ├── api/
+│   │   ├── contracts.py    # GET /api/contracts 标准契约清单（评测平台发现）
+│   │   └── v1/             # REST 路由（auth/projects/bids/matching/reviews/...）
 │   ├── services/           # 业务服务层（专家匹配/围串标/评审/outbox/归档...）
 │   ├── ai/
 │   │   ├── rag/            # 分块器 / 向量化 / 三路召回检索 / 降级判定
@@ -274,6 +280,7 @@ smart-procurement/
 │   ├── setup_demo.sh                 # 一键初始化
 │   ├── demo.sh                       # 3 场景演示
 │   ├── accept_p*.py                  # 各阶段 API 验收脚本
+│   ├── verify_sp_e2e.py              # SSE 标准契约容器内验证（19/19）
 │   └── benchmark_p75/                # RAG/AI 评分/意图质量基准
 ├── tests/                  # 单元(unit) + 集成(integration) + E2E
 ├── alembic/                # 数据库迁移
@@ -296,8 +303,9 @@ smart-procurement/
 | P3 | LLM 集成 + SSE 流式评审 + 收尾归档 | 意图识别 97%、SSE 全链路 |
 | P4 | 专家匹配 + 回避申报 + 通知 | 冲突 100% 召回 |
 | P5 | 围串标检测（初筛+深度+报告） | 围串标组命中、正常组 0 误报 |
-| P6 | 前端 4 角色 20+ 页面 + 联调 | 浏览器实测 + SSE 全链路 |
+| P6 | 前端 4 角色 20+ 页面 + 联调 + 端到端冒烟 | 浏览器全链路实测（走通至定标 + 供应商查看中标）+ SSE 正常/断流/降级 |
 | P7 | 数据门禁 + 测试 + E2E + 基准 + 压测 | 单测 164 / 集成 89 / E2E 6 全绿；**SLA 8/8** |
+| 评测适配 | SSE 标准契约改造 + 契约清单端点 | `verify_sp_e2e.py` 容器内 **19/19** 通过 |
 
 运行全部测试：
 
@@ -316,7 +324,7 @@ poetry run pytest tests/e2e -p no:html -p no:metadata -m e2e  # 浏览器 E2E（
 poetry install                    # 依赖安装（含 playwright 浏览器需另 `playwright install`）
 cp .env.example .env              # 配 DEEPSEEK_API_KEY / FERNET_KEY
 docker compose up -d              # 起中间件
-poetry run uvicorn app.main:app --reload --port 8000   # 本地热重载 API
+poetry run uvicorn app.main:app --reload --port 8002   # 本地热重载 API（与 compose 的 SP_APP_PORT 默认一致）
 ```
 
 ### 改后端代码
@@ -349,7 +357,7 @@ poetry run uvicorn app.main:app --reload --port 8000   # 本地热重载 API
 | `bge_m3` 为 fail | 首次启动需下载模型（hf-mirror），等 `sp-bge-m3` healthy；或确认 `BGE_M3_ENDPOINT` |
 | 前端 8080 白屏 | `web/` 未构建 dist：`cd web && npm install && npm run build`，重启 nginx |
 | AI 评分显示"纯人工模式" | DeepSeek 熔断或停用（`DEEPSEEK_ENABLED=false`），恢复后前端可一键切回 |
-| 端口冲突 8000/3306/8081 | 修改 `.env` 对应端口（compose 会引用），或停掉占用进程 |
+| 端口冲突（同机多栈） | 宿主端口已参数化：`SP_APP_PORT`(API 默认 8002) / `WEB_PORT`(前端默认 8080) / `MYSQL_PORT` / `MILVUS_PORT` / `REDIS_PORT` / `BGE_M3_PORT`，改 `.env` 对应变量即可，容器内部互连不受影响 |
 | 演示数据被污染 | 重跑 `./scripts/setup_demo.sh`（TRUNCATE 重建，幂等） |
 | 压测/基准脚本 | `poetry run python scripts/sla_p76.py` / `scripts/benchmark_p75/` 各基准，见文件头注释 |
 
@@ -359,4 +367,4 @@ poetry run uvicorn app.main:app --reload --port 8000   # 本地热重载 API
 
 - **技术方案**：[solution.md](solution.md)（架构设计、数据模型、API 契约、风险控制）
 - **任务拆分与验收**：[task.md](task.md)（P0-P7 逐项任务与验收标准）
-- **已实现 API 清单**：solution.md 4.6（35+ 端点 + SSE 事件流）
+- **已实现 API 清单**：solution.md 4.6（35+ 端点 + SSE 事件流）；标准契约清单 `GET /api/contracts`（无鉴权）
