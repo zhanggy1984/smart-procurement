@@ -161,7 +161,7 @@ async def _collect_stream(session, review_id, expert_id):
 
 @pytest.mark.asyncio
 async def test_stream_score_price_formula_events():
-    """报价维度 SSE：thinking(PRICE_CALC) → price_calc → done，事件序与 seq 递增。"""
+    """报价维度 SSE：meta 首帧 → thinking(PRICE_CALC) → price_calc → done，事件序与 seq 递增。"""
     session = AsyncMock()
     review = MagicMock()
     review.expert_id = "EXP-1"
@@ -182,15 +182,19 @@ async def test_stream_score_price_formula_events():
     session.scalars.return_value = lot_bids
 
     events = await _collect_stream(session, "REV-1", "EXP-1")
-    assert [ev["event"] for ev in events] == ["thinking", "price_calc", "done"]
+    # 契约 meta 首帧（§5.1）：每个 SSE 流统一透出 agent 元信息
+    assert [ev["event"] for ev in events] == ["meta", "thinking", "price_calc", "done"]
+    assert events[0]["event"] == "meta"
     assert events[0]["id"] == 1
-    assert events[0]["data"]["stage"] == "PRICE_CALC"
+    # thinking(PRICE_CALC) 紧随 meta，seq=2
+    assert events[1]["id"] == 2
+    assert events[1]["data"]["stage"] == "PRICE_CALC"
     # 公式可审计：基准价 100，报价 100 → 满分 20
-    assert events[1]["data"]["result"]["calculatedScore"] == 20.0
-    assert events[1]["data"]["result"]["basePrice"] == 100.0
+    assert events[2]["data"]["result"]["calculatedScore"] == 20.0
+    assert events[2]["data"]["result"]["basePrice"] == 100.0
     # seq 递增（P3.6 断流续推用 Last-Event-ID）
     seqs = [ev["id"] for ev in events]
-    assert seqs == [1, 2, 3]
+    assert seqs == [1, 2, 3, 4]
     # 公式可审计：基准价 = Σ/N = (100+120+80)/3 = 100
 
 
