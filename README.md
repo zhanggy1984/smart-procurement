@@ -2,9 +2,20 @@
 
 > **一站式 AI 智能评标平台**：从投标受理、围串标风控、专家智能匹配与利益冲突回避，到 AI 辅助打分、评标汇总与定标归档，全链路数字化、可审计、可降级。
 
-本系统是**生产级全栈演示项目**：9 个容器一键启动、3 大业务场景数据开箱即演示、164 项单元测试 + 89 项集成测试 + 6 条浏览器级 E2E 全绿、核心链路 SLA 压测 8/8 达标。
+本系统是**生产级全栈演示项目**：共享 infra + 3 应用服务一键启动、3 大业务场景数据开箱即演示、164 项单元测试 + 89 项集成测试 + 6 条浏览器级 E2E 全绿、核心链路 SLA 压测 8/8 达标。
 
 ---
+
+> ## ⚠️ 前置依赖：共享 infra
+>
+> 本 agent **不自带任何中间件**，运行前须先部署共享 infra（MySQL/Neo4j/Milvus/MinIO/Redis/BGE-M3 等）。
+>
+> ```bash
+> # 发布物：clone infra 独立仓库后启动
+> git clone https://github.com/zhanggy1984/share-infra && cd infra && docker compose up -d
+> # 本地开发：infra 位于 ../infra
+> cd ../infra && docker compose up -d
+> ```
 
 ## 目录
 
@@ -133,7 +144,7 @@ graph TB
         NGINX["nginx :8080<br/>静态服务 + /api/v1 反代 + SSE 关闭缓冲"]
     end
     subgraph 应用层
-        API["FastAPI App :8002<br/>REST API + SSE 流式"]
+        API["FastAPI App :18002<br/>REST API + SSE 流式"]
         WK["arq Worker<br/>outbox 消费 / 标书解析 / 归档"]
     end
     subgraph AI 服务
@@ -189,6 +200,7 @@ graph TB
 ## 六、快速开始（3 步跑起来）
 
 > 前置：Docker Desktop（Linux 容器）、Python 3.11 + Poetry。
+> **共享 infra**：本 agent 不自带任何中间件（MySQL/Neo4j/Milvus/MinIO/Redis/BGE-M3 全在共享 infra）。启动前先部署 infra（见 infra 仓库 README：`docker compose up -d`）。
 
 ### 第 1 步：配置环境变量
 
@@ -198,23 +210,22 @@ cp .env.example .env
 #   DEEPSEEK_API_KEY=sk-xxx        # DeepSeek API Key（AI 评分/意图必需）
 ```
 
-### 第 2 步：一键启动全栈（9 个容器）
+### 第 2 步：启动应用容器（app + worker + nginx）
 
 ```bash
-docker compose up -d
-# 等待各容器 healthy（首次含镜像构建与 BGE-M3 模型下载，约 5-15 分钟）
-docker compose ps                 # 全部 Up + healthy
-curl localhost:8002/health/ready  # {"status":"ok","mysql":"ok","neo4j":"ok",...}
+docker compose up -d --build
+# 首次含镜像构建
+docker compose ps                 # sp-app / sp-worker / sp-web 全部 Up + healthy
+curl localhost:18002/health/ready # {"status":"ok","mysql":"ok","neo4j":"ok",...}
 ```
 
-> **端口说明**：宿主端口已参数化（`SP_APP_PORT` API 默认 **8002**、`WEB_PORT` 前端默认 **8080**、`MYSQL_PORT`/`MILVUS_PORT`/`REDIS_PORT`/`BGE_M3_PORT`）。同机跑多套栈端口冲突时，在 `.env` 覆盖对应变量即可；容器内部服务名互连不受影响。实际访问端口以 `.env` 为准。
+> **端口说明**：`SP_APP_PORT` API 默认 **18002**、`WEB_PORT` 前端默认 **18080**（`.env` 可覆盖）。
+> 本 agent 只起应用容器；MySQL/Neo4j/Milvus/MinIO/Redis/BGE-M3 全在共享 infra（库 `smart_procurement`、collection `sp_bid_documents`、bucket `bid-files`）。
 
-### 第 3 步：初始化数据（建表 + 合成数据 + 演示场景）
+### 第 3 步：初始化数据
 
-```bash
-poetry install                    # 宿主机环境（scripts/alembic 在宿主机跑）
-./scripts/setup_demo.sh           # 建表→导入合成数据→52 份标书向量化→3 场景就绪（约 20 分钟，首次）
-```
+> 演示数据已随全量迁移进入共享 infra（MySQL 23 表 + Neo4j 图谱 + Milvus `sp_bid_documents` + MinIO `bid-files`），通常无需初始化。
+> 如需重建：`./scripts/setup_demo.sh`（建表 alembic → 合成数据 → 向量化，约 20 分钟；连接共享 infra）。
 
 **跑起来了**：
 
@@ -323,8 +334,8 @@ poetry run pytest tests/e2e -p no:html -p no:metadata -m e2e  # 浏览器 E2E（
 ```bash
 poetry install                    # 依赖安装（含 playwright 浏览器需另 `playwright install`）
 cp .env.example .env              # 配 DEEPSEEK_API_KEY / FERNET_KEY
-docker compose up -d              # 起中间件
-poetry run uvicorn app.main:app --reload --port 8002   # 本地热重载 API（与 compose 的 SP_APP_PORT 默认一致）
+docker compose up -d              # 起共享 infra（MySQL/Neo4j/Milvus/Redis/BGE-M3）
+poetry run uvicorn app.main:app --reload --port 18002  # 本地热重载 API（与 compose 的 SP_APP_PORT 默认一致）
 ```
 
 ### 改后端代码
@@ -357,7 +368,7 @@ poetry run uvicorn app.main:app --reload --port 8002   # 本地热重载 API（�
 | `bge_m3` 为 fail | 首次启动需下载模型（hf-mirror），等 `sp-bge-m3` healthy；或确认 `BGE_M3_ENDPOINT` |
 | 前端 8080 白屏 | `web/` 未构建 dist：`cd web && npm install && npm run build`，重启 nginx |
 | AI 评分显示"纯人工模式" | DeepSeek 熔断或停用（`DEEPSEEK_ENABLED=false`），恢复后前端可一键切回 |
-| 端口冲突（同机多栈） | 宿主端口已参数化：`SP_APP_PORT`(API 默认 8002) / `WEB_PORT`(前端默认 8080) / `MYSQL_PORT` / `MILVUS_PORT` / `REDIS_PORT` / `BGE_M3_PORT`，改 `.env` 对应变量即可，容器内部互连不受影响 |
+| 端口冲突（同机多栈） | 宿主端口已参数化：`SP_APP_PORT`(API 默认 18002) / `WEB_PORT`(前端默认 18080)，改 `.env` 对应变量即可；中间件端口由共享 infra 管理 |
 | 演示数据被污染 | 重跑 `./scripts/setup_demo.sh`（TRUNCATE 重建，幂等） |
 | 压测/基准脚本 | `poetry run python scripts/sla_p76.py` / `scripts/benchmark_p75/` 各基准，见文件头注释 |
 
