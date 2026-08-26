@@ -141,7 +141,10 @@ LOT-007 演示场景：SUP-012/013 同一实控人 → 综合 **HIGH 59.2** → 
 graph TB
     subgraph 前端
         WEB["Vue3 + Element Plus<br/>（web/dist，npm run build）"]
-        NGINX["nginx :8080<br/>静态服务 + /api/v1 反代 + SSE 关闭缓冲"]
+        NGINX["nginx :8080<br/>静态服务 + /api/v1 反代 → api-gateway + SSE 关闭缓冲"]
+    end
+    subgraph 共享网关
+        GATEWAY["API 网关 api-gateway:8099（共享 infra）<br/>Host 虚拟域名路由 + X-Request-ID traceId<br/>按真实 IP 限流 + SSE 透传"]
     end
     subgraph 应用层
         API["FastAPI App :18002<br/>REST API + SSE 流式"]
@@ -160,9 +163,10 @@ graph TB
     end
 
     WEB --> NGINX
-    NGINX --> API
+    NGINX --> GATEWAY
+    GATEWAY --> API
     NGINX --> WK
-    API -- SSE 流式评分 --> WEB
+    GATEWAY -- SSE 流式评分 --> WEB
     API --> MYSQL
     API --> NEO4J
     API --> MILVUS
