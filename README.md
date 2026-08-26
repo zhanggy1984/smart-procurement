@@ -180,6 +180,8 @@ graph TB
     WK --> NEO4J
 ```
 
+**对外链路（统一 API 网关）**：浏览器只访问前端 nginx；nginx 将 `/api/v1` 反代到共享网关 `api-gateway:8099`（`Host: sp.local`），网关按 Host 虚拟域名路由到本 agent 后端，并生成 `X-Request-ID`（后端日志 `trace_id` 即此值）、按真实 IP 限流、SSE 透传。网关由共享 infra 仓库提供（`infra/api-gateway/`），未知 Host 一律 403 防串线。宿主端口映射的 backend 地址（如 `localhost:18002`）仅供开发调试 / 评测直连，绕过网关。
+
 **关键链路**：投标上传 → 异步解析（worker：提取 → 分块 → 向量化入库）→ 投标关闭触发围串标检测 → 专家匹配（MySQL 候选 + Neo4j 冲突排除）→ 回避申报 → 评审（RAG 检索 → DeepSeek 流式评分 → 专家确认）→ 结束评审出报告 PDF → 定标归档 → 供应商查看结果。
 
 ---
