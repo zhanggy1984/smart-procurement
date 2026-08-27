@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from sqlalchemy import select  # noqa: E402
 
 from app.ai.llm.deepseek_client import get_client  # noqa: E402
-from app.ai.llm.prompts import build_score_prompt  # noqa: E402
+from app.ai.llm.prompts import build_score_prompt, split_thinking_answer  # noqa: E402
 from app.ai.rag.retriever import retrieve  # noqa: E402
 from app.core.database import session_factory  # noqa: E402
 from app.models.project import ScoringDimension  # noqa: E402
@@ -120,6 +120,8 @@ async def main() -> None:
                 chunks=chunks,
             )
             text = await client.chat(prompt, max_tokens=2048)
+            # P7.x：只取 <answer> 结论段，分数提取与引用锚词不因 <thinking> 推理段干扰
+            _thinking, text = split_thinking_answer(text)
             m = _RE_SCORE.search(text)
             if not m:
                 print(f"  [未解析分数] {bid} {dim_key} raw={text[:80]!r}")

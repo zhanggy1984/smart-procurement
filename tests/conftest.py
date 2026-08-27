@@ -14,7 +14,7 @@ import os
 _MYSQL_USER = "smart"
 _MYSQL_PASSWORD = "smart_procurement_dev"
 _MYSQL_HOST = "localhost"
-_MYSQL_PORT = "3306"
+_MYSQL_PORT = "33061"
 TEST_DATABASE = "smart_procurement_test"
 
 os.environ.setdefault(

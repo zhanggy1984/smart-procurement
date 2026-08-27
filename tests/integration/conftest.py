@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 TEST_DB = os.environ.get("MYSQL_DATABASE", "smart_procurement_test")
 DB_URL = os.environ["MYSQL_URL"]
 
-_ROOT_URL = "mysql+asyncmy://root:root_dev_pass@localhost:3306"
+_ROOT_URL = "mysql+asyncmy://root:root_infra_pass@localhost:33061"
 
 # 业务表（不含 alembic_version）。DDL 为逻辑外键、无 DB 约束，TRUNCATE 顺序无关。
 BUSINESS_TABLES = [

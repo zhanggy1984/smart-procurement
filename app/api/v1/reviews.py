@@ -26,7 +26,7 @@ from app.schemas.review import ChatRequest, ReviewCreate, ReviewOut, SaveScoreRe
 from app.services import review_service as svc
 from app.services import conversation_service as conversation
 from app.ai.llm.deepseek_client import get_client
-from app.ai.llm.prompts import build_chat_prompt
+from app.ai.llm.prompts import ThinkingAnswerSplitter, build_chat_prompt
 from app.ai.rag.retriever import retrieve_with_meta
 from app.core.sse import sse_event
 from app.models.bid_document import BidDocument
@@ -280,17 +280,31 @@ async def stream_chat(
             total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
                            "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 0}
             try:
-                # 对话回答即答案正文：契约 reasoning/answer 同 delta 双发，thought 保留旧前端
-                async for delta, u in get_client().chat_stream(prompt, max_tokens=1024):
+                # P7.x：prompt 契约先 <thinking> 推理、再 <answer> 结论；reasoning 发推理段，
+                # answer/thought 只发结论段，full 仅存结论（思考不进对话历史，避免污染摘要）
+                splitter = ThinkingAnswerSplitter()
+                async for delta, u in get_client().chat_stream(prompt, max_tokens=2048):
                     if u:
                         for _k in total_usage:
                             total_usage[_k] += u.get(_k, 0) or 0
-                    if not delta:
+                    for kind, piece in splitter.feed(delta):
+                        if not piece:
+                            continue
+                        if kind == "reasoning":
+                            yield sse_event("reasoning", {"delta": piece}, seq := seq + 1)
+                        else:
+                            full += piece
+                            yield sse_event("answer", {"delta": piece}, seq := seq + 1)
+                            yield sse_event("thought", {"delta": piece}, seq := seq + 1)
+                for kind, piece in splitter.flush():
+                    if not piece:
                         continue
-                    full += delta
-                    yield sse_event("reasoning", {"delta": delta}, seq := seq + 1)
-                    yield sse_event("answer", {"delta": delta}, seq := seq + 1)
-                    yield sse_event("thought", {"delta": delta}, seq := seq + 1)
+                    if kind == "reasoning":
+                        yield sse_event("reasoning", {"delta": piece}, seq := seq + 1)
+                    else:
+                        full += piece
+                        yield sse_event("answer", {"delta": piece}, seq := seq + 1)
+                        yield sse_event("thought", {"delta": piece}, seq := seq + 1)
             finally:
                 if full.strip():
                     await conversation.add_message(

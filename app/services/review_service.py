@@ -20,7 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.llm.deepseek_client import CircuitOpenError, get_client
-from app.ai.llm.prompts import build_score_prompt
+from app.ai.llm.prompts import ThinkingAnswerSplitter, build_score_prompt
 from app.ai.rag.retriever import retrieve_with_meta
 from app.core.config import settings
 from app.core.crypto import generate_id
@@ -236,24 +236,38 @@ async def stream_score(
         structured_data=bid.structured_data,
     )
 
-    # LLM 流式评分。thought 增量即答案正文（评分理由+分数一体，非独立 reasoner 模式），
-    # 契约 reasoning/answer 同 delta 双发（评测端两维度都有正文、TTFT=首个 token），thought 保留旧前端。
-    # 7.4 cache 字段：DeepSeek 响应带 prompt_cache_hit/miss_tokens，累加透传评测平台按命中价计成本
+    # LLM 流式评分。P7.x：prompt 契约要求先 <thinking> 推理、再 <answer> 结论；切分器
+    # 把推理段单独透出 reasoning 事件，answer/thought 只发结论段（full_text 仅存结论，
+    # 思考不进评论/历史）。无标签降级全文当 answer，契约不破。7.4 cache 字段：
+    # DeepSeek 响应带 prompt_cache_hit/miss_tokens，累加透传评测平台按命中价计成本
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
                    "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 0}
     yield sse_event("thinking", {"stage": "REASONING"}, seq := seq + 1)
     full_text = ""
+    splitter = ThinkingAnswerSplitter()
     try:
         async for delta, u in get_client().chat_stream(prompt, max_tokens=2048):
             if u:
                 for _k in total_usage:
                     total_usage[_k] += u.get(_k, 0) or 0
-            if not delta:
+            for kind, piece in splitter.feed(delta):
+                if not piece:
+                    continue
+                if kind == "reasoning":
+                    yield sse_event("reasoning", {"delta": piece}, seq := seq + 1)
+                else:
+                    full_text += piece
+                    yield sse_event("answer", {"delta": piece}, seq := seq + 1)
+                    yield sse_event("thought", {"delta": piece}, seq := seq + 1)
+        for kind, piece in splitter.flush():
+            if not piece:
                 continue
-            full_text += delta
-            yield sse_event("reasoning", {"delta": delta}, seq := seq + 1)
-            yield sse_event("answer", {"delta": delta}, seq := seq + 1)
-            yield sse_event("thought", {"delta": delta}, seq := seq + 1)
+            if kind == "reasoning":
+                yield sse_event("reasoning", {"delta": piece}, seq := seq + 1)
+            else:
+                full_text += piece
+                yield sse_event("answer", {"delta": piece}, seq := seq + 1)
+                yield sse_event("thought", {"delta": piece}, seq := seq + 1)
     except CircuitOpenError:
         yield sse_event("thinking", {"stage": "LLM_DOWN"}, seq := seq + 1)
         yield sse_event("usage", total_usage, seq := seq + 1)
