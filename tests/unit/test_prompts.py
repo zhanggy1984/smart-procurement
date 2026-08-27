@@ -269,10 +269,67 @@ def test_thinking_answer_splitter_stream():
     out = _feed_all(["<thinking>想", "</thinking>", "\n<ans", "wer>答", "案</answer>"])
     assert "".join(d for k, d in out if k == "reasoning") == "想"
     assert "".join(d for k, d in out if k == "answer") == "\n答案"
-    # 思考未闭合即结束 → 内容走 reasoning，answer 空
+    # 思考未闭合即结束 → P8.3 兜底：reasoning 发思考全文，flush 兜底 answer 双发（不丢结论）
     out = _feed_all(["<thinking>半截思考"])
     assert "".join(d for k, d in out if k == "reasoning") == "半截思考"
+    assert "".join(d for k, d in out if k == "answer") == "半截思考"
+
+
+# ==================== P8.3 thinking-without-answer 兜底（契约三发不破） ====================
+
+
+def test_thinking_without_answer_fallback():
+    """LLM 只给 <thinking> 未给 <answer> 即结束 → flush 兜底把思考全文重发为 answer。
+
+    修复契约回归偶发失败根因：chat 断言 len(reasoning)==len(answer)==len(thought) 在
+    reasoning=1/answer=0 时破；兜底后 answer/thought 事件存在、done.content 非空。
+    """
+    out = _feed_all(["<thinking>依据标书技术方案综合判断，方案完整可行。</thinking>"])
+    assert "".join(d for k, d in out if k == "reasoning") == "依据标书技术方案综合判断，方案完整可行。"
+    assert "".join(d for k, d in out if k == "answer") == "依据标书技术方案综合判断，方案完整可行。"
+    # 事件数对齐：reasoning == answer（chat 三发契约前提）
+    assert len([k for k, _ in out if k == "reasoning"]) == len([k for k, _ in out if k == "answer"])
+
+
+def test_thinking_without_answer_split_across_chunks():
+    """thinking 跨 chunk 流式且无 answer → 兜底 answer 为全部思考段拼接（顺序稳定）。
+
+    注：流式 feed 下 reasoning 是思考独立流（逐 delta，段数天然不定），flush 兜底 answer 是
+    单段结论——事件数只在"整段单 feed"的 chat 场景对齐（三发各 1），跨 chunk 只验内容一致。
+    """
+    out = _feed_all(["<think", "ing>第一段思", "考，第二段思考</thinking>"])
+    reasoning = "".join(d for k, d in out if k == "reasoning")
+    answer = "".join(d for k, d in out if k == "answer")
+    assert reasoning == "第一段思考，第二段思考"
+    assert answer == reasoning  # 兜底内容 == 思考全文
+
+
+def test_empty_answer_tag_falls_back_to_thinking():
+    """<thinking>x</thinking><answer></answer> 空 answer 闭合 → 兜底 answer=x（空结论不造假）。"""
+    out = _feed_all(["<thinking>推理内容</thinking><answer></answer>"])
+    assert "".join(d for k, d in out if k == "reasoning") == "推理内容"
+    assert "".join(d for k, d in out if k == "answer") == "推理内容"
+
+
+def test_empty_thinking_no_fallback():
+    """空 thinking（<thinking></thinking>）→ 无 reasoning 无 answer，不兜底不造假内容。"""
+    out = _feed_all(["<thinking></thinking>"])
+    assert "".join(d for k, d in out if k == "reasoning") == ""
     assert "".join(d for k, d in out if k == "answer") == ""
+
+
+def test_fallback_not_triggered_when_answer_present():
+    """正常契约（thinking + answer）→ 不触发兜底，answer 只发结论段。"""
+    out = _feed_all(["<thinking>推理过程</thinking><answer>最终结论</answer>"])
+    assert "".join(d for k, d in out if k == "reasoning") == "推理过程"
+    assert "".join(d for k, d in out if k == "answer") == "最终结论"
+
+
+def test_fallback_not_triggered_when_no_tag():
+    """从未见标签（纯文本）→ 旧契约双发，_answered 置位，flush 不兜底不重复。"""
+    out = _feed_all(["纯文本内容"])
+    assert "".join(d for k, d in out if k == "reasoning") == "纯文本内容"
+    assert "".join(d for k, d in out if k == "answer") == "纯文本内容"
 
 
 # ==================== P7.x retrieval_meta：置信度进 prompt（契约标准化） ====================

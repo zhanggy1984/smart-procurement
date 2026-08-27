@@ -360,6 +360,25 @@ class ThinkingAnswerSplitter:
         # 是否已出现过完整开标签（<thinking>/<answer>）。从未见标签 = LLM 未按契约输出，
         # 此时全文按旧契约 reasoning/answer 双发，保证 SSE 双发不破（评测 §5.1）。
         self._ever_tag = False
+        # P8.3 thinking-without-answer 兜底状态：发过非空 answer 段？已发 reasoning 累积。
+        # LLM 只给 <thinking> 未给 <answer>（含 thinking 未闭合即结束）时，flush 用思考全文
+        # 兜底为 answer 双发，保证 answer/thought 事件与 done.content 非空（契约不破）。
+        self._answered = False
+        self._reasoning_buf = ""
+
+    def _emit_reasoning(self, out: list[tuple[str, str]], text: str) -> None:
+        """发射 reasoning 段并累积进 _reasoning_buf（flush 兜底需引用思考全文）。"""
+        if not text:
+            return
+        self._reasoning_buf += text
+        out.append(("reasoning", text))
+
+    def _emit_answer(self, out: list[tuple[str, str]], text: str) -> None:
+        """发射 answer 段并置 _answered（已有结论 = 无需 flush 兜底）。"""
+        if not text:
+            return
+        self._answered = True
+        out.append(("answer", text))
 
     def _emit_plain(self, out: list[tuple[str, str]], text: str) -> None:
         """无标签正文发射：从未见标签 → reasoning/answer 双发（旧契约）；已进标签契约 →
@@ -367,10 +386,10 @@ class ThinkingAnswerSplitter:
         if not text:
             return
         if self._ever_tag:
-            out.append(("answer", text))
+            self._emit_answer(out, text)
         else:
-            out.append(("reasoning", text))
-            out.append(("answer", text))
+            self._emit_reasoning(out, text)
+            self._emit_answer(out, text)
 
     def feed(self, delta: str) -> list[tuple[str, str]]:
         """喂入增量，返回 [(kind, delta), ...]。增量可能被切分/合并，按序消费。"""
@@ -385,34 +404,29 @@ class ThinkingAnswerSplitter:
                     tail = _trailing_close_prefix(self._buf, _ANSWER_CLOSE)
                     if tail:
                         emit = self._buf[: -len(tail)] if len(self._buf) > len(tail) else ""
-                        if emit:
-                            out.append(("answer", emit))
+                        self._emit_answer(out, emit)
                         self._buf = tail  # 半截 </answer> 跨 chunk，留待下块凑全
                         return out  # buf 是前缀本身时立即返回，避免死循环
                     else:
-                        out.append(("answer", self._buf))
+                        self._emit_answer(out, self._buf)
                         self._buf = ""
                 else:
-                    if self._buf[:idx]:
-                        out.append(("answer", self._buf[:idx]))
+                    self._emit_answer(out, self._buf[:idx])
                     self._buf = self._buf[idx + len(_ANSWER_CLOSE):]
                     self._in_answer = False
                     # <answer> 闭合后残留（模型收尾的元话）按 answer 透出，防丢内容
-                    if self._buf.strip():
-                        out.append(("answer", self._buf))
+                    self._emit_answer(out, self._buf)
                     self._buf = ""
             elif self._in_thinking:
                 idxc = self._buf.find(_THINKING_CLOSE)
                 ida = self._buf.find(_ANSWER_OPEN)
                 if idxc != -1:
-                    if self._buf[:idxc]:
-                        out.append(("reasoning", self._buf[:idxc]))
+                    self._emit_reasoning(out, self._buf[:idxc])
                     self._buf = self._buf[idxc + len(_THINKING_CLOSE):]
                     self._in_thinking = False
                 elif ida != -1:
                     # LLM 跳过 </thinking> 直接开 <answer>：其前内容归 thinking，切到 answer 段
-                    if self._buf[:ida]:
-                        out.append(("reasoning", self._buf[:ida]))
+                    self._emit_reasoning(out, self._buf[:ida])
                     self._buf = self._buf[ida + len(_ANSWER_OPEN):]
                     self._in_thinking = False
                     self._in_answer = True
@@ -420,12 +434,11 @@ class ThinkingAnswerSplitter:
                     tail = _trailing_close_prefix(self._buf, _THINKING_CLOSE)
                     if tail:
                         emit = self._buf[: -len(tail)] if len(self._buf) > len(tail) else ""
-                        if emit:
-                            out.append(("reasoning", emit))
+                        self._emit_reasoning(out, emit)
                         self._buf = tail  # 半截 </thinking> 跨 chunk，留待下块凑全
                         return out  # buf 是前缀本身时立即返回，避免死循环
                     else:
-                        out.append(("reasoning", self._buf))
+                        self._emit_reasoning(out, self._buf)
                         self._buf = ""
             else:
                 ia = self._buf.find(_ANSWER_OPEN)
@@ -433,14 +446,14 @@ class ThinkingAnswerSplitter:
                 if ia != -1 and (it == -1 or ia <= it):
                     prefix = self._buf[:ia]
                     if prefix.strip():
-                        out.append(("reasoning", prefix))  # <answer> 前未闭合的思考残余
+                        self._emit_reasoning(out, prefix)  # <answer> 前未闭合的思考残余
                     self._buf = self._buf[ia + len(_ANSWER_OPEN):]
                     self._in_answer = True
                     self._ever_tag = True
                 elif it != -1:
                     prefix = self._buf[:it]
                     if prefix.strip():
-                        out.append(("answer", prefix))  # <thinking> 前杂文本按降级当 answer
+                        self._emit_answer(out, prefix)  # <thinking> 前杂文本按降级当 answer
                     self._buf = self._buf[it + len(_THINKING_OPEN):]
                     self._in_thinking = True
                     self._ever_tag = True
@@ -459,9 +472,19 @@ class ThinkingAnswerSplitter:
         return out
 
     def flush(self) -> list[tuple[str, str]]:
-        """流结束时收尾：剩余缓冲按当前段发。未闭合内容归 answer（降级兜底，不丢内容）。"""
-        if not self._buf:
-            return []
-        out: list[tuple[str, str]] = [("answer", self._buf)]
-        self._buf = ""
-        return out
+        """流结束时收尾：剩余缓冲按当前段发。未闭合内容归 answer（降级兜底，不丢内容）。
+
+        P8.3 thinking-without-answer：LLM 只给 <thinking> 未给 <answer>（含 thinking 未闭合
+        即结束）时，思考内容已作为 reasoning 流式发完、无残留缓冲可兜底 → 用 _reasoning_buf
+        把思考全文重发为 answer，保证 answer/thought 事件与 done.content 非空（chat 契约三发、
+        score 结论透出不破），不丢 LLM 结论。从未进标签契约 / 已发过 answer / 思考为空则
+        不兜底（不造假内容）。
+        """
+        if self._buf:
+            out: list[tuple[str, str]] = []
+            self._emit_answer(out, self._buf)
+            self._buf = ""
+            return out
+        if self._ever_tag and not self._answered and self._reasoning_buf:
+            return [("answer", self._reasoning_buf)]
+        return []
