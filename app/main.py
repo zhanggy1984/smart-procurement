@@ -30,6 +30,15 @@ HARD_DEPENDENCIES = ("mysql", "neo4j", "redis")
 SOFT_DEPENDENCIES = ("milvus", "deepseek", "bge_m3")
 
 
+def _jwt_secret_secure(secret: str) -> bool:
+    """JWT 密钥强度校验：非空、非公开默认值、≥32 字符。
+
+    防漏配 JWT_SECRET_KEY 时静默用 config.py 默认值（change-me-in-production，
+    公开已知）签发 token 伪造任意身份。不满足即拒绝启动（fail loud）。
+    """
+    return bool(secret) and secret != "change-me-in-production" and len(secret) >= 32
+
+
 async def _check_dependency(name: str) -> bool:
     """单项依赖连通性检查，返回是否可用。"""
     try:
@@ -74,8 +83,13 @@ async def _ready_status() -> dict[str, str]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """启动校验 + 关闭清理。硬依赖失败时 exit(1)。"""
+    """启动校验 + 关闭清理。配置缺陷/硬依赖失败时 exit(1)。"""
     logging.setup_logging(settings.log_level)
+    # JWT 密钥安全校验（fail loud）：默认值/弱密钥拒绝启动，防公开密钥伪造身份
+    if not _jwt_secret_secure(settings.jwt_secret_key):
+        print("[startup] JWT_SECRET_KEY 缺失/为默认值/过短（须 ≥32 随机字符），拒绝启动",
+              file=sys.stderr)
+        sys.exit(1)
     checks = await asyncio.gather(*[_check_dependency(n) for n in HARD_DEPENDENCIES])
     failed = [n for n, ok in zip(HARD_DEPENDENCIES, checks) if not ok]
     if failed:

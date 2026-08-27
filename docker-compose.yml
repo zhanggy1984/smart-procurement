@@ -52,7 +52,7 @@ services:
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?deepseek_api_key 必须设置}
       DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
       BGE_M3_ENDPOINT: http://bge-m3:8081
-      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-production}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY 必须设置（用 openssl rand -hex 32 生成）}
     ports:
       - "${SP_APP_PORT:-18002}:8000"
     volumes:
