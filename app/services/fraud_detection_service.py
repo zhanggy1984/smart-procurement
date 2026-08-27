@@ -2,7 +2,8 @@
 
 close_bidding()：PM 关闭投标。
 - 校验 lot=BIDDING；有效标书（PARSED/PARSING）<3 → ABANDONED
-- SELECT FOR UPDATE 锁 lot 行防并发（同一标段重复关闭）
+- 行锁只覆盖状态流转：无锁读校验 + 三检（锁外）→ with_for_update 锁行
+  重读（populate_existing 强制刷新）校验后短事务流转，防并发重复关闭
 - 初筛三检（不走 AI）：
   - 关系图谱粗检（Neo4j）：投标供应商间 SAME_CONTROLLER(+30)/AFFILIATE_OF(+20)/BID_TOGETHER(+10)
   - 报价异常初检（MySQL）：报价集中度（价差 <1% → +40）
@@ -16,6 +17,7 @@ close_bidding()：PM 关闭投标。
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import structlog
@@ -127,11 +129,14 @@ async def _vector_check(bid_ids: list[str]) -> tuple[int, list[dict]]:
 
 
 async def close_bidding(session: AsyncSession, *, lot_id: str, operator_id: str) -> dict:
-    """关闭投标：校验 → 三检 → 风险评分 → 状态流转。返回风险与流转结果。"""
-    # SELECT FOR UPDATE 锁 lot 行防并发
-    lot = (
-        await session.execute(select(Lot).where(Lot.lot_id == lot_id).with_for_update())
-    ).scalar_one_or_none()
+    """关闭投标：校验 → 三检 → 风险评分 → 状态流转。返回风险与流转结果。
+
+    行锁只覆盖状态流转（自查 #2）：先无锁读校验 + 三检（vector 检含 Milvus/FAISS，
+    可能秒级），最后 with_for_update 锁行重读校验后短事务流转——避免跨三检长时间
+    持有 lot 行锁，阻塞同标段其他事务。
+    """
+    # 1. 无锁读校验（锁外，短）
+    lot = await session.scalar(select(Lot).where(Lot.lot_id == lot_id))
     if lot is None:
         raise LotNotFoundError(f"标段不存在: {lot_id}")
     if lot.status != LOT_BIDDING:
@@ -144,7 +149,17 @@ async def close_bidding(session: AsyncSession, *, lot_id: str, operator_id: str)
     ).all()
     valid = [b for b in bids if b.status in (BidStatus.PARSED, BidStatus.PARSING)]
     if len(valid) < 3:
-        lot.status = LOT_ABANDONED
+        # 终态 ABANDONED：锁行重读校验后短事务改状态（防并发双写）。
+        # populate_existing 强制刷新 identity map 对象，否则 cur 即步骤1旧 lot、校验永不触发
+        cur = (
+            await session.execute(
+                select(Lot).where(Lot.lot_id == lot_id).with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if cur is None or cur.status != LOT_BIDDING:
+            raise LotNotBiddableError("标段状态已变更，请重试")
+        cur.status = LOT_ABANDONED
         await session.commit()
         logger.info("fraud.abandoned", lot_id=lot_id, valid=len(valid))
         raise NoValidBidsError(f"有效标书仅 {len(valid)} 家（需 ≥3），标段已 ABANDONED")
@@ -152,22 +167,31 @@ async def close_bidding(session: AsyncSession, *, lot_id: str, operator_id: str)
     supplier_ids = list({b.supplier_id for b in valid})
     amounts = [float(b.bid_amount) for b in valid if b.bid_amount]
 
-    # 三检
+    # 2. 三检（锁外；vector 检的 Milvus/FAISS 已 to_thread 卸载事件循环）
     graph_score, graph_ev = await _graph_check(supplier_ids)
     price_score, price_ev = _price_check(amounts)
     vector_score, vector_ev = await _vector_check([b.bid_id for b in valid])
     total = graph_score + price_score + vector_score
     risk = "LOW" if total <= float(config_service.get_sync("fraud.auto_pass_threshold")) else "MEDIUM"
 
-    # 状态流转
+    # 3. 锁行重读（防三检期间并发状态变更）+ 短事务状态流转。
+    # populate_existing 强制刷新 identity map 对象，否则 cur 即步骤1旧 lot、守卫永不触发
+    cur = (
+        await session.execute(
+            select(Lot).where(Lot.lot_id == lot_id).with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if cur is None or cur.status != LOT_BIDDING:
+        raise LotNotBiddableError("标段状态已变更，请重试")
     if risk == "LOW":
         for b in valid:
             b.status = BidStatus.FROZEN
-        lot.status = LOT_UNDER_REVIEW
+        cur.status = LOT_UNDER_REVIEW
         await session.commit()
         logger.info("fraud.auto_pass", lot_id=lot_id, score=total)
     else:
-        lot.status = LOT_PRE_SCREEN  # PM 待办确认
+        cur.status = LOT_PRE_SCREEN  # PM 待办确认
         await session.commit()
         logger.info("fraud.pending_pm", lot_id=lot_id, score=total)
 
@@ -233,21 +257,28 @@ async def deep_text_similarity(lot_id: str, bid_ids: list[str]) -> dict:
     """
     from app.core.milvus import get_collection
 
-    chunks: list[dict] = []
-    for bid_id in bid_ids:
-        try:
-            rows = get_collection().query(
-                expr=f'bid_id == "{bid_id}"',
-                output_fields=["chunk_id", "bid_id", "embedding"],
-                limit=500,
-            )
-            chunks.extend(rows)
-        except Exception:  # noqa: BLE001  Milvus 不可用/无数据
-            continue
+    # Milvus query（pymilvus 同步阻塞）+ FAISS（CPU 密集）卸载到线程池：
+    # 否则 PM 触发 close-bidding / 深度检测时阻塞事件循环，全站请求排队（自查 #1）
+    def _query_chunks() -> list[dict]:
+        chunks: list[dict] = []
+        for bid_id in bid_ids:
+            try:
+                rows = get_collection().query(
+                    expr=f'bid_id == "{bid_id}"',
+                    output_fields=["chunk_id", "bid_id", "embedding"],
+                    limit=500,
+                )
+                chunks.extend(rows)
+            except Exception:  # noqa: BLE001  Milvus 不可用/无数据
+                continue
+        return chunks
+
+    chunks = await asyncio.to_thread(_query_chunks)
     pair_thr = int(config_service.get_sync("fraud.similar_pair_threshold"))
-    pairs = _faiss_similar_pairs(
+    pairs = await asyncio.to_thread(
+        _faiss_similar_pairs,
         chunks,
-        threshold=float(config_service.get_sync("fraud.text_similarity_threshold")),
+        float(config_service.get_sync("fraud.text_similarity_threshold")),
     )
 
     # 标书级命中：按组合统计高相似段落对数，达阈值才判定文本相似

@@ -24,6 +24,7 @@ from app.services.fraud_detection_service import (
     _vector_check,
     close_bidding,
     deep_detection,
+    deep_text_similarity,
     generate_report,
     _llm_report,
 )
@@ -47,6 +48,7 @@ async def test_close_bidding_low_auto_pass():
     lot.status = "BIDDING"
     exec_result = MagicMock()
     exec_result.scalar_one_or_none.return_value = lot
+    session.scalar.return_value = lot
     session.execute.return_value = exec_result
 
     bids = [_mk_bid("BID-1", "S1", 100), _mk_bid("BID-2", "S2", 110), _mk_bid("BID-3", "S3", 120)]
@@ -72,6 +74,7 @@ async def test_close_bidding_medium_pending_pm():
     lot.status = "BIDDING"
     exec_result = MagicMock()
     exec_result.scalar_one_or_none.return_value = lot
+    session.scalar.return_value = lot
     session.execute.return_value = exec_result
 
     bids = [_mk_bid("BID-1", "S1", 100), _mk_bid("BID-2", "S2", 110), _mk_bid("BID-3", "S3", 120)]
@@ -98,6 +101,7 @@ async def test_close_bidding_insufficient_abandons():
     lot.status = "BIDDING"
     exec_result = MagicMock()
     exec_result.scalar_one_or_none.return_value = lot
+    session.scalar.return_value = lot
     session.execute.return_value = exec_result
 
     bids = [_mk_bid("BID-1", "S1", 100), _mk_bid("BID-2", "S2", 110)]  # 仅 2 家
@@ -118,6 +122,7 @@ async def test_close_bidding_not_biddable():
     lot.status = "UNDER_REVIEW"
     exec_result = MagicMock()
     exec_result.scalar_one_or_none.return_value = lot
+    session.scalar.return_value = lot
     session.execute.return_value = exec_result
     with pytest.raises(LotNotBiddableError):
         await close_bidding(session, lot_id="LOT-1", operator_id="U-1")
@@ -129,6 +134,7 @@ async def test_close_bidding_lot_not_found():
     session = AsyncMock()
     exec_result = MagicMock()
     exec_result.scalar_one_or_none.return_value = None
+    session.scalar.return_value = None
     session.execute.return_value = exec_result
     with pytest.raises(LotNotFoundError):
         await close_bidding(session, lot_id="LOT-X", operator_id="U-1")
@@ -248,3 +254,49 @@ async def test_llm_report_fallback_template():
             "evidence": {},
         })
     assert "模板报告" in text
+
+
+@pytest.mark.asyncio
+async def test_close_bidding_status_changed_before_lock():
+    """三检期间并发状态变更 → 锁行重读拒绝（LotNotBiddableError），防重复覆盖流转。"""
+    session = AsyncMock()
+    lot_bidding = MagicMock()
+    lot_bidding.status = "BIDDING"
+    lot_changed = MagicMock()
+    lot_changed.status = "UNDER_REVIEW"  # 锁行重读读到最新状态（populate_existing 刷新）
+    session.scalar.return_value = lot_bidding  # 步骤1 无锁读
+    exec_result = MagicMock()
+    exec_result.scalar_one_or_none.return_value = lot_changed  # 步骤3 锁行重读
+    session.execute.return_value = exec_result
+
+    bids = [_mk_bid("BID-1", "S1", 100), _mk_bid("BID-2", "S2", 110), _mk_bid("BID-3", "S3", 120)]
+    bid_result = MagicMock()
+    bid_result.all.return_value = bids
+    session.scalars.return_value = bid_result
+
+    with patch("app.services.fraud_detection_service._graph_check", new=AsyncMock(return_value=(0, []))), \
+         patch("app.services.fraud_detection_service._vector_check", new=AsyncMock(return_value=(0, []))):
+        with pytest.raises(LotNotBiddableError):
+            await close_bidding(session, lot_id="LOT-1", operator_id="U-1")
+
+
+@pytest.mark.asyncio
+async def test_deep_text_similarity_unloads_via_thread():
+    """Milvus query + FAISS 经 asyncio.to_thread 卸载（自查 #1，不阻塞事件循环）。"""
+    def _no_pairs(chunks, threshold=0.85):
+        return []
+
+    mock_collection = MagicMock()
+    mock_collection.query.return_value = [
+        {"chunk_id": "C1", "bid_id": "BID-1", "embedding": [0.1] * 8},
+    ]
+    with patch("app.core.milvus.get_collection", return_value=mock_collection), \
+         patch("app.services.fraud_detection_service.asyncio.to_thread") as mock_thread, \
+         patch("app.services.fraud_detection_service._faiss_similar_pairs", new=_no_pairs):
+        # 让 to_thread 真实执行目标函数（同时记录调用）
+        mock_thread.side_effect = lambda fn, *a, **kw: fn(*a, **kw)
+        result = await deep_text_similarity("LOT-1", ["BID-1"])
+    # 两个同步块（Milvus query / FAISS）均经 to_thread 卸载，不阻塞事件循环
+    assert mock_thread.call_count == 2
+    assert all(callable(c.args[0]) for c in mock_thread.call_args_list)
+    assert result["chunk_count"] == 1
