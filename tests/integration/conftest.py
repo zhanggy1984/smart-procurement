@@ -234,7 +234,10 @@ async def client():
 
     from app.main import app
 
-    transport = httpx.ASGITransport(app=app)
+    # raise_app_exceptions=False 对齐真实 ASGI 服务器：P8 全局 handler 发送
+    # 500/503 响应后 Starlette ServerErrorMiddleware 总会 re-raise（uvicorn 仅记
+    # 日志、响应已送达客户端）；httpx 默认 True 会把 re-raise 抛给测试而非返回响应。
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx.AsyncClient(transport=transport, base_url="http://test", timeout=30) as c:
         yield c
 

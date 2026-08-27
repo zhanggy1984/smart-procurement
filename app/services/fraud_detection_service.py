@@ -61,25 +61,33 @@ class NoValidBidsError(ValueError):
 
 
 async def _graph_check(supplier_ids: list[str]) -> tuple[int, list[dict]]:
-    """关系图谱粗检（Neo4j）：投标供应商间关联对。返回 (分数, 证据)。"""
+    """关系图谱粗检（Neo4j）：投标供应商间关联对。返回 (分数, 证据)。
+
+    P8：Neo4j 不可用 → (0, [GRAPH_UNAVAILABLE]) 图检跳过（失败偏置非 fail-stop）。
+    marker 项无 rel key，deep_detection 一票否决 `ev.get("rel")` 不误触。
+    """
     if len(supplier_ids) < 2:
         return 0, []
-    driver = neo4j.get_driver()
-    pairs: list[dict] = []
-    async with driver.session() as session:
-        # 初筛只认实质关联（同一控制人/隶属）；BID_TOGETHER（共同投标）是正常行为，
-        # 不计入初筛风险，留给 P5.3 深度检测综合评分。
-        result = await session.run(
-            "MATCH (a:Supplier)-[r:SAME_CONTROLLER|AFFILIATE_OF]->(b:Supplier) "
-            "WHERE a.supplierId IN $sids AND b.supplierId IN $sids AND a.supplierId <> b.supplierId "
-            "RETURN a.supplierId AS a, b.supplierId AS b, type(r) AS rel",
-            sids=supplier_ids,
-        )
-        async for rec in result:
-            pairs.append({"a": rec["a"], "b": rec["b"], "rel": rec["rel"]})
-    score = sum(_REL_SCORES.get(p["rel"], 10) for p in pairs)
-    logger.info("fraud.graph_check", pairs=pairs, score=score)
-    return min(score, 100), pairs
+    try:
+        driver = neo4j.get_driver()
+        pairs: list[dict] = []
+        async with driver.session() as session:
+            # 初筛只认实质关联（同一控制人/隶属）；BID_TOGETHER（共同投标）是正常行为，
+            # 不计入初筛风险，留给 P5.3 深度检测综合评分。
+            result = await session.run(
+                "MATCH (a:Supplier)-[r:SAME_CONTROLLER|AFFILIATE_OF]->(b:Supplier) "
+                "WHERE a.supplierId IN $sids AND b.supplierId IN $sids AND a.supplierId <> b.supplierId "
+                "RETURN a.supplierId AS a, b.supplierId AS b, type(r) AS rel",
+                sids=supplier_ids,
+            )
+            async for rec in result:
+                pairs.append({"a": rec["a"], "b": rec["b"], "rel": rec["rel"]})
+        score = sum(_REL_SCORES.get(p["rel"], 10) for p in pairs)
+        logger.info("fraud.graph_check", pairs=pairs, score=score)
+        return min(score, 100), pairs
+    except Exception as e:  # noqa: BLE001  Neo4j 不可用 → 图检跳过（0 分 + 降级证据）
+        logger.warning("fraud.graph_check_failed", suppliers=len(supplier_ids), error=str(e))
+        return 0, [{"type": "GRAPH_UNAVAILABLE", "detail": "Neo4j 暂不可用，关系图谱检跳过"}]
 
 
 def _price_check(amounts: list[float]) -> tuple[int, list[dict]]:
@@ -294,23 +302,30 @@ def risk_level(
 
 
 async def _deep_graph_check(supplier_ids: list[str]) -> tuple[int, list[dict]]:
-    """供应商关联（含 BID_TOGETHER）。`LIMIT 10` 上限保护（min() 语义防大结果集）。"""
+    """供应商关联（含 BID_TOGETHER）。`LIMIT 10` 上限保护（min() 语义防大结果集）。
+
+    P8：Neo4j 不可用 → (0, [GRAPH_UNAVAILABLE]) 图检跳过，同 _graph_check 语义。
+    """
     if len(supplier_ids) < 2:
         return 0, []
-    driver = neo4j.get_driver()
-    pairs: list[dict] = []
-    async with driver.session() as session:
-        result = await session.run(
-            "MATCH (a:Supplier)-[r:SAME_CONTROLLER|AFFILIATE_OF|BID_TOGETHER]->(b:Supplier) "
-            "WHERE a.supplierId IN $sids AND b.supplierId IN $sids AND a.supplierId <> b.supplierId "
-            "WITH a, b, r LIMIT 10 "
-            "RETURN a.supplierId AS a, b.supplierId AS b, type(r) AS rel",
-            sids=supplier_ids,
-        )
-        async for rec in result:
-            pairs.append({"a": rec["a"], "b": rec["b"], "rel": rec["rel"]})
-    score = min(100, sum(_DEEP_REL_SCORES.get(p["rel"], 10) for p in pairs))
-    return score, pairs
+    try:
+        driver = neo4j.get_driver()
+        pairs: list[dict] = []
+        async with driver.session() as session:
+            result = await session.run(
+                "MATCH (a:Supplier)-[r:SAME_CONTROLLER|AFFILIATE_OF|BID_TOGETHER]->(b:Supplier) "
+                "WHERE a.supplierId IN $sids AND b.supplierId IN $sids AND a.supplierId <> b.supplierId "
+                "WITH a, b, r LIMIT 10 "
+                "RETURN a.supplierId AS a, b.supplierId AS b, type(r) AS rel",
+                sids=supplier_ids,
+            )
+            async for rec in result:
+                pairs.append({"a": rec["a"], "b": rec["b"], "rel": rec["rel"]})
+        score = min(100, sum(_DEEP_REL_SCORES.get(p["rel"], 10) for p in pairs))
+        return score, pairs
+    except Exception as e:  # noqa: BLE001  Neo4j 不可用 → 图检跳过（0 分 + 降级证据）
+        logger.warning("fraud.deep_graph_check_failed", suppliers=len(supplier_ids), error=str(e))
+        return 0, [{"type": "GRAPH_UNAVAILABLE", "detail": "Neo4j 暂不可用，关系图谱检跳过"}]
 
 
 def _deep_price_check(amounts: list[float]) -> tuple[int, list[dict]]:

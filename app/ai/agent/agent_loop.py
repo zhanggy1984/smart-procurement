@@ -85,6 +85,18 @@ def _merge_usage(total: dict, usage: dict) -> None:
         total[k] += usage.get(k, 0) or 0
 
 
+async def _answer_or_error(text: str, usage_total: dict) -> AsyncIterator[dict]:
+    """作答帧生成：text 空 → error 帧（P8 空回复兜底，前端不出现空白气泡）。
+
+    LLM 偶发空输出（content 全空白/异常截断）时若照常发 answer 帧，前端只显示
+    空消息，用户无法判断是否重试。空回复转 error 帧提示"请重试或换一种问法"。
+    """
+    if text.strip():
+        yield {"type": "answer", "text": text, "usage": usage_total}
+    else:
+        yield {"type": "error", "message": "AI 未生成有效回复，请重试或换一种问法"}
+
+
 def _question_text(messages: list[dict]) -> str:
     """从 messages 取最后一条 user 消息原文（build_chat_prompt 尾部为当前问题）。"""
     for m in reversed(messages):
@@ -191,7 +203,8 @@ async def stream_agent(
             yield {"type": "tool_call", "name": name, "args": args,
                    "result": _tool_result_summary(result), "status": status, "intent": rule_intent}
             answer = await _answer_after_tool(messages, tool_calls, result, usage_total, rule_intent, non_doc)
-            yield {"type": "answer", "text": answer, "usage": usage_total}
+            async for ev in _answer_or_error(answer, usage_total):
+                yield ev
             return
 
         if (rule_intent in ("query", "unknown") and not non_doc
@@ -223,11 +236,13 @@ async def stream_agent(
             else:
                 # 检索也空：固定话术（query→未找到、unknown→澄清），防空 context 再编造
                 answer = _NOT_FOUND_ANSWER if rule_intent == "query" else _UNKNOWN_ANSWER
-            yield {"type": "answer", "text": answer, "usage": usage_total}
+            async for ev in _answer_or_error(answer, usage_total):
+                yield ev
             return
 
         # ---- LLM 直接答（smalltalk / 非文档问题 / 明确不需要工具）：round1 content 即作答 ----
-        yield {"type": "answer", "text": round1_content.strip(), "usage": usage_total}
+        async for ev in _answer_or_error(round1_content.strip(), usage_total):
+            yield ev
     except CircuitOpenError:
         yield {"type": "error", "message": "AI 服务不可用，请稍后重试"}
     except Exception as e:

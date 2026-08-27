@@ -22,6 +22,13 @@ engine: AsyncEngine = create_async_engine(
     pool_pre_ping=True,
     pool_recycle=3600,
     echo=settings.debug,
+    # P8 异常兜底：连接/读取超时（asyncmy 原生 connect_timeout/read_timeout，
+    # 覆盖默认无限等待）+ 连接池等待超时（池耗尽不无限阻塞）
+    connect_args={
+        "connect_timeout": settings.mysql_connect_timeout,
+        "read_timeout": settings.mysql_read_timeout,
+    },
+    pool_timeout=10,
 )
 
 # session 工厂：业务代码通过 `async with session_factory() as session` 使用

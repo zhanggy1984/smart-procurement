@@ -135,3 +135,87 @@ async def test_retrieve_with_meta_return_meta_low_score(monkeypatch):
     assert hint == DegradationHint.NO_EVIDENCE
     assert meta["source_count"] == 0
     assert meta["confidence_band"] == "none"
+
+
+# ==================== P8 异常兜底：检索链路降级断裂 ====================
+
+
+class _FakeEmbedder:
+    """embed 可配（正常返回向量 / 抛异常模拟 BGE-M3 挂）。"""
+
+    def __init__(self, raise_error: bool = False):
+        self.raise_error = raise_error
+
+    async def embed(self, texts):
+        if self.raise_error:
+            raise RuntimeError("embedding service down")
+        return [[0.1, 0.2, 0.3]]
+
+
+def _fake_chunks(lot_id, bid_id):
+    return [
+        {"chunk_id": "c1", "content": "系统采用微服务架构，分层清晰", "chapter_title": "章", "page_no": 1},
+    ]
+
+
+async def _empty_structured(q, bid_id):
+    """结构化路 mock：返回空（async，与 _structured_match 签名对齐）。"""
+    return []
+
+
+@pytest.mark.asyncio
+async def test_embedding_failure_degrades_semantic(monkeypatch):
+    """BGE-M3 挂 → 不抛异常，semantic_ok=False，关键词路仍出结果。"""
+    from app.ai.rag import retriever as R
+
+    monkeypatch.setattr(R, "get_embedder", lambda: _FakeEmbedder(raise_error=True))
+    monkeypatch.setattr(R, "_query_all_chunks", _fake_chunks)
+    monkeypatch.setattr(R, "_structured_match", _empty_structured)
+    results, max_score, semantic_ok = await R._retrieve_internal(
+        "微服务架构", lot_id="L", bid_id="B"
+    )
+    assert semantic_ok is False
+    assert max_score is None
+    assert len(results) > 0  # 关键词路兜底出结果
+    assert all(r.source != "vector" for r in results)
+
+
+@pytest.mark.asyncio
+async def test_milvus_search_non_timeout_failure_degrades(monkeypatch):
+    """Milvus search 非超时故障（连接/gRPC）→ semantic_ok=False，关键词结果仍在。"""
+    from app.ai.rag import retriever as R
+
+    monkeypatch.setattr(R, "get_embedder", lambda: _FakeEmbedder())
+
+    def _raise(*a, **kw):
+        raise RuntimeError("milvus conn refused")
+
+    monkeypatch.setattr(R, "_search_vector", _raise)
+    monkeypatch.setattr(R, "_query_all_chunks", _fake_chunks)
+    monkeypatch.setattr(R, "_structured_match", _empty_structured)
+    results, max_score, semantic_ok = await R._retrieve_internal(
+        "微服务架构", lot_id="L", bid_id="B"
+    )
+    assert semantic_ok is False
+    assert max_score is None
+    assert len(results) > 0  # 关键词路仍可用
+
+
+@pytest.mark.asyncio
+async def test_query_all_chunks_failure_degrades_to_structured(monkeypatch):
+    """Milvus query 挂 → 关键词路也空，但结构化路仍出结果；hint=SEMANTIC_DOWN。"""
+    from app.ai.rag import retriever as R
+    from app.ai.rag.degradation import DegradationHint
+
+    monkeypatch.setattr(R, "get_embedder", lambda: _FakeEmbedder())
+    monkeypatch.setattr(R, "_search_vector", lambda *a, **kw: [])
+    monkeypatch.setattr(R, "_query_all_chunks", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("milvus query down")))
+
+    async def _one_structured(q, bid_id):
+        return [("structured:B:质量", 1.0)]
+
+    monkeypatch.setattr(R, "_structured_match", _one_structured)
+    results, hint = await R.retrieve_with_meta("质量", lot_id="L", bid_id="B")
+    assert hint == DegradationHint.SEMANTIC_DOWN
+    assert len(results) == 1
+    assert results[0].source == "structured"  # 结构化路兜底

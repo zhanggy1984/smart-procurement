@@ -86,32 +86,49 @@ async def _load_bidding_suppliers(session: AsyncSession, lot_id: str) -> list[st
     )
 
 
+async def _conflicts_with_status(
+    expert_ids: list[str], supplier_ids: list[str]
+) -> tuple[dict[str, list[str]], bool]:
+    """Step 3：Neo4j 批量冲突检测（4 条回避路径），带异常兜底。
+
+    返回 (conflicts, graph_error)：Neo4j 故障 → ({}, True)（图检跳过，匹配降级为
+    无冲突检测，不整体 500）；正常 → (conflicts, False)。调用方据 graph_error
+    透出降级提示（matching 返回 graph_error 字段）。
+    """
+    if not expert_ids:
+        return {}, False
+    try:
+        driver = neo4j.get_driver()
+        conflicts: dict[str, list[str]] = {}
+        async with driver.session() as session:
+            result = await session.run(
+                "UNWIND $experts AS eid "
+                "MATCH (e:Expert {expertId:eid}) "
+                "OPTIONAL MATCH (e)-[r:EMPLOYED_BY|HOLDS_SHARE|RELATIVE_EMPLOYED]->(s:Supplier) "
+                "  WHERE s.supplierId IN $sids "
+                "OPTIONAL MATCH (e)-[r2:SAME_ORGANIZATION]->(e2:Expert) "
+                "  WHERE e2.expertId IN $experts AND e2.expertId <> eid "
+                "RETURN eid, "
+                "  [x IN collect(DISTINCT type(r)) WHERE x IS NOT NULL] + "
+                "  [x IN collect(DISTINCT type(r2)) WHERE x IS NOT NULL] AS rels",
+                experts=expert_ids, sids=supplier_ids,
+            )
+            async for rec in result:
+                rels = [r for r in rec["rels"] if r]
+                if rels:
+                    conflicts[rec["eid"]] = rels
+        logger.debug("match.conflicts", experts=len(expert_ids), conflicts=len(conflicts))
+        return conflicts, False
+    except Exception as e:  # noqa: BLE001  Neo4j 不可用 → 图检跳过（失败偏置非 fail-stop）
+        logger.warning("match.conflicts_failed", experts=len(expert_ids), error=str(e))
+        return {}, True
+
+
 async def _find_conflicts(
     expert_ids: list[str], supplier_ids: list[str]
 ) -> dict[str, list[str]]:
-    """Step 3：Neo4j 批量冲突检测（4 条回避路径）。返回 {expert_id: [rel,...]}。"""
-    if not expert_ids:
-        return {}
-    driver = neo4j.get_driver()
-    conflicts: dict[str, list[str]] = {}
-    async with driver.session() as session:
-        result = await session.run(
-            "UNWIND $experts AS eid "
-            "MATCH (e:Expert {expertId:eid}) "
-            "OPTIONAL MATCH (e)-[r:EMPLOYED_BY|HOLDS_SHARE|RELATIVE_EMPLOYED]->(s:Supplier) "
-            "  WHERE s.supplierId IN $sids "
-            "OPTIONAL MATCH (e)-[r2:SAME_ORGANIZATION]->(e2:Expert) "
-            "  WHERE e2.expertId IN $experts AND e2.expertId <> eid "
-            "RETURN eid, "
-            "  [x IN collect(DISTINCT type(r)) WHERE x IS NOT NULL] + "
-            "  [x IN collect(DISTINCT type(r2)) WHERE x IS NOT NULL] AS rels",
-            experts=expert_ids, sids=supplier_ids,
-        )
-        async for rec in result:
-            rels = [r for r in rec["rels"] if r]
-            if rels:
-                conflicts[rec["eid"]] = rels
-    logger.debug("match.conflicts", experts=len(expert_ids), conflicts=len(conflicts))
+    """Step 3：Neo4j 批量冲突检测（薄封装，签名不变，expert_declaration_service 调用点兼容）。"""
+    conflicts, _ = await _conflicts_with_status(expert_ids, supplier_ids)
     return conflicts
 
 
@@ -227,8 +244,10 @@ async def match_experts(
     candidates = await _load_candidates(session, tags, region)
     suppliers = await _load_bidding_suppliers(session, lot_id)
 
-    # Step 3 冲突检测
-    conflicts = await _find_conflicts([c["expert_id"] for c in candidates], suppliers)
+    # Step 3 冲突检测（P8：Neo4j 故障 → graph_error=True 图检跳过，返回透出降级）
+    conflicts, graph_error = await _conflicts_with_status(
+        [c["expert_id"] for c in candidates], suppliers
+    )
     clean = [c for c in candidates if c["expert_id"] not in conflicts]
 
     # Step 4 排序
@@ -283,4 +302,6 @@ async def match_experts(
         "excluded_conflict": list(conflicts.keys()),
         "insufficient": insufficient,
         "match_mode": "AUTO",
+        # P8 异常兜底：Neo4j 不可用时图检跳过，透出降级标志（additive 字段）
+        "graph_error": graph_error,
     }

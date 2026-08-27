@@ -11,6 +11,7 @@ from datetime import timedelta
 from functools import lru_cache
 from io import BytesIO
 
+import urllib3
 from minio import Minio
 
 from app.core.config import settings
@@ -22,12 +23,26 @@ def get_minio_client() -> Minio:
 
     endpoint 传 host:port（minio-py 7.x 不接受带 scheme 的 endpoint，scheme
     由 secure 标志决定——实测 `Minio("http://...")` 抛 "path in endpoint"）。
+    P8 异常兜底：minio-py 7.x `Minio.__init__` 无 timeout 参数，默认 urllib3
+    超时 300s 过长——传自定义 http_client（urllib3 是 minio 传递依赖，不新增
+    依赖）。保留 status_forcelist 重试（只改 timeout，不丢 5xx 重试）。
     """
     return Minio(
         settings.minio_endpoint,
         access_key=settings.minio_access_key,
         secret_key=settings.minio_secret_key,
         secure=False,  # 本地/内网 HTTP；生产走 HTTPS 时改 secure=True
+        http_client=urllib3.PoolManager(
+            timeout=urllib3.Timeout(
+                connect=settings.minio_connect_timeout,
+                read=settings.minio_read_timeout,
+            ),
+            retries=urllib3.Retry(
+                total=5,
+                backoff_factor=0.2,
+                status_forcelist=[500, 502, 503, 504],
+            ),
+        ),
     )
 
 

@@ -251,16 +251,18 @@ function parseSseBlock(block) {
   const parts = block.split('\n\n')
   for (const part of parts) {
     let event = 'message'
+    let id = null
     const dataLines = []
     for (const line of part.split('\n')) {
       if (line.startsWith('event:')) event = line.slice(6).trim()
       else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim())
+      else if (line.startsWith('id:')) id = Number(line.slice(3).trim())
     }
     if (dataLines.length) {
       try {
-        frames.push({ event, data: JSON.parse(dataLines.join('\n')) })
+        frames.push({ event, data: JSON.parse(dataLines.join('\n')), id })
       } catch {
-        frames.push({ event, data: dataLines.join('\n') })
+        frames.push({ event, data: dataLines.join('\n'), id })
       }
     }
   }
@@ -271,6 +273,7 @@ async function streamSse(resp, onEvent) {
   const reader = resp.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
+  let lastId = 0
   for (;;) {
     const { done, value } = await reader.read()
     if (done) break
@@ -279,12 +282,20 @@ async function streamSse(resp, onEvent) {
     while ((idx = buffer.indexOf('\n\n')) >= 0) {
       const block = buffer.slice(0, idx)
       buffer = buffer.slice(idx + 2)
-      for (const f of parseSseBlock(block)) onEvent(f)
+      for (const f of parseSseBlock(block)) {
+        if (f.id != null) lastId = Math.max(lastId, f.id)
+        onEvent(f)
+      }
     }
   }
   if (buffer.trim()) {
-    for (const f of parseSseBlock(buffer)) onEvent(f)
+    for (const f of parseSseBlock(buffer)) {
+      if (f.id != null) lastId = Math.max(lastId, f.id)
+      onEvent(f)
+    }
   }
+  // 末帧 seq：断流重连的 Last-Event-ID 依据
+  return lastId
 }
 
 function handleScoreEvent(f) {
@@ -307,6 +318,9 @@ function handleScoreEvent(f) {
     const stage = f.data.stage
     if (stage === 'NO_EVIDENCE') noEvidence.value = true
     else if (stage !== 'PRICE_CALC') aiText.value += `\n[${stage}] `
+  } else if (f.event === 'error') {
+    aiText.value += `\n\n【评分中断】${f.data.detail || '请重试'}`
+    ElMessage.error(f.data.detail || '评分中断，请重试')
   } else if (f.event === 'reset') {
     aiText.value = '[SSE 缓存过期，请重新评分]'
   }
@@ -321,23 +335,37 @@ async function aiScore() {
   citations.value = []
   aiLoading.value = true
   try {
-    const token = localStorage.getItem('sp_token')
-    const resp = await fetch(`/api/v1/reviews/${rid}/score`, {
-      method: 'POST',
-      headers: {
+    let lastId = 0
+    // 断流重连：最多 3 次；lastId>0 且未收尾帧（done/error/reset）→ 按 Last-Event-ID
+    // 走 Redis 缓存续推（后端不发新 LLM），否则全量重拉会重复耗 LLM
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const token = localStorage.getItem('sp_token')
+      const headers = {
         Authorization: `Bearer ${token}`,
+        // 每次请求独立 key：幂等检查仅防双击，不参与续推去重
         'X-Idempotency-Key': crypto.randomUUID(),
-      },
-    })
-    if (!resp.ok) {
-      if (resp.status === 503) {
-        enterDegrade()
+      }
+      if (lastId > 0) headers['Last-Event-ID'] = String(lastId)
+      const resp = await fetch(`/api/v1/reviews/${rid}/score`, {
+        method: 'POST',
+        headers,
+      })
+      if (!resp.ok) {
+        if (resp.status === 503) {
+          enterDegrade()
+          return
+        }
+        const body = await resp.json().catch(() => ({}))
+        ElMessage.error(body.detail || `评分失败（${resp.status}）`)
         return
       }
-      const body = await resp.json().catch(() => ({}))
-      throw new Error(body.detail || `评分失败（${resp.status}）`)
+      let finished = false
+      lastId = await streamSse(resp, (f) => {
+        if (f.event === 'done' || f.event === 'error' || f.event === 'reset') finished = true
+        handleScoreEvent(f)
+      })
+      if (finished || lastId === 0) break
     }
-    await streamSse(resp, handleScoreEvent)
   } catch (e) {
     ElMessage.error(e.message || 'AI 评分失败')
   } finally {
@@ -358,15 +386,24 @@ async function sendChat() {
   try {
     const resp = await chatReview(rid, q)
     if (!resp.ok) {
+      // 仅 503（断路器 OPEN）降级纯人工；业务 4xx 是正常错误，提示不降级
+      if (resp.status === 503) {
+        enterDegrade()
+        return
+      }
       const body = await resp.json().catch(() => ({}))
-      throw new Error(body.detail || `对话失败（${resp.status}）`)
+      ElMessage.error(body.detail || `对话失败（${resp.status}）`)
+      return
     }
     await streamSse(resp, (f) => {
       if (f.event === 'thought' && f.data.delta) aiMsg.content += f.data.delta
-      if (f.event === 'error') throw new Error(f.data.detail || '对话失败')
+      if (f.event === 'error') {
+        // 业务/流中断错误：仅提示，不降级 AI（降级只认 503 响应）
+        ElMessage.error(f.data.detail || '对话失败')
+      }
     })
   } catch (e) {
-    enterDegrade()
+    // 网络层异常：不降级，提示重试
     ElMessage.error(e.message || '对话失败')
   } finally {
     chatLoading.value = false

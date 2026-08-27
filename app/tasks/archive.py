@@ -87,14 +87,26 @@ async def _merge_bid_together(project_id: str) -> int:
         by_lot.setdefault(lot_id, []).append(sup_id)
 
     count = 0
+    failed = 0
     for _lot_id, sups in by_lot.items():
         sups = sorted(set(sups))
         for i in range(len(sups)):
             for j in range(i + 1, len(sups)):
                 # 双向：BID_TOGETHER 无向，建一条即可（Neo4j MERGE）
-                await neo4j_sync.upsert_bid_together(sups[i], sups[j])
-                count += 1
-    logger.info("archive.bid_together", project_id=project_id, relations=count)
+                # P8 异常兜底：Neo4j 故障跳过该对不计数（图暂不可用，归档 job 继续），
+                # 后续 worker reconcile 会补（MERGE 幂等）
+                try:
+                    await neo4j_sync.upsert_bid_together(sups[i], sups[j])
+                    count += 1
+                except Exception as e:  # noqa: BLE001
+                    failed += 1
+                    logger.warning("archive.bid_together_failed", project_id=project_id,
+                                   sup_a=sups[i], sup_b=sups[j], error=str(e))
+    if failed:
+        logger.warning("archive.bid_together_partial", project_id=project_id,
+                       relations=count, failed=failed)
+    else:
+        logger.info("archive.bid_together", project_id=project_id, relations=count)
     return count
 
 

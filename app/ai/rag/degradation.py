@@ -30,6 +30,10 @@ class DegradationHint:
     SEMANTIC_DOWN = "语义检索暂不可用，以下分析仅基于结构化数据"
     LLM_DOWN = "AI 推理引擎暂不可用，已切换为人工评审模式"
     MYSQL_DOWN = "核心数据暂不可用，请稍后重试"
+    # P8 LLM 输出校验：答非所问/空输出/分数越界 → 人工评分兜底
+    NO_SCORE = "未识别到有效分数，请人工评分"
+    SCORE_OUT_OF_RANGE = "LLM 输出分数超出范围，已忽略，请人工评分"
+    EMPTY_OUTPUT = "AI 未返回有效内容，请人工评分"
 
 
 def classify_retrieval(max_score: float | None, *, bid_parsed: bool, semantic_ok: bool) -> str | None:

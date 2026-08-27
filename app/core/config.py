@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     mysql_password: str = "smart_procurement_dev"
     mysql_root_password: str = "root_dev_pass"
     mysql_url: str | None = None  # 显式连接串，优先于分项配置
+    # P8 异常兜底：连接/读取超时（asyncmy 原生 connect_timeout/read_timeout）+ 连接池等待超时
+    mysql_connect_timeout: float = 5.0
+    mysql_read_timeout: float = 60.0
 
     # ========== Neo4j ==========
     neo4j_uri: str = "bolt://localhost:7687"
@@ -51,6 +54,9 @@ class Settings(BaseSettings):
     minio_secret_key: str = "minio_dev_pass"
     minio_bucket: str = "bid-files"
     minio_presign_expiry_seconds: int = 1800
+    # P8 异常兜底：MinIO 连接/读取超时（urllib3 http_client，覆盖默认 300s 过长）
+    minio_connect_timeout: float = 5.0
+    minio_read_timeout: float = 60.0
 
     # ========== Redis ==========
     redis_url: str = "redis://localhost:6379/0"

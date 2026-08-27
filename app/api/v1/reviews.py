@@ -39,6 +39,7 @@ logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["reviews"])
 
 _idem_pool = None
+_last_redis_warn = 0.0
 
 
 async def _idem_redis():
@@ -53,10 +54,30 @@ async def _idem_redis():
     return _idem_pool
 
 
+async def _redis_warn_once(tag: str, error: str) -> None:
+    """Redis 故障限频告警（30s 内只打一次，防 SSE 每帧都刷屏）。"""
+    global _last_redis_warn
+    now = time.monotonic()
+    if now - _last_redis_warn > 30:
+        _last_redis_warn = now
+        logger.warning(tag, error=error)
+
+
 async def _check_idempotency(key: str, review_id: str) -> None:
-    """评分幂等：X-Idempotency-Key 去重（24h）。重复使用 → 422。"""
-    r = await _idem_redis()
-    ok = await r.set(f"idem:score:{key}", review_id, ex=86400, nx=True)
+    """评分幂等：X-Idempotency-Key 去重（24h）。重复使用 → 422。
+
+    P8 异常兜底：Redis 不可用 → fail-open 放行（幂等是安全网非正确性保证——
+    评分流无破坏性写入，真实保存走 PUT /reviews/{id}/score，重复流只多耗 LLM；
+    若 503 会直接断评分主链路，违背项目降级哲学）。前端 :loading/disabled 已防双击。
+    """
+    try:
+        r = await _idem_redis()
+        ok = await r.set(f"idem:score:{key}", review_id, ex=86400, nx=True)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001  Redis 不可用 → 放行
+        await _redis_warn_once("review.idem_redis_down", str(e))
+        return
     if not ok:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -71,18 +92,31 @@ _SSE_CACHE_TTL = 300
 
 
 async def _cache_sse_frame(review_id: str, frame: str) -> None:
-    """缓存已发 SSE 帧（Redis list，断流续推用）。"""
-    r = await _idem_redis()
-    key = f"sse:cache:{review_id}"
-    await r.rpush(key, frame)
-    await r.expire(key, _SSE_CACHE_TTL)
+    """缓存已发 SSE 帧（Redis list，断流续推用）。
+
+    P8：Redis 挂 → 跳过缓存不阻断流（断流续推降级为不可用，前端可全量重拉）。
+    """
+    try:
+        r = await _idem_redis()
+        key = f"sse:cache:{review_id}"
+        await r.rpush(key, frame)
+        await r.expire(key, _SSE_CACHE_TTL)
+    except Exception as e:  # noqa: BLE001
+        await _redis_warn_once("review.sse_cache_down", str(e))
 
 
 async def _load_sse_cache(review_id: str) -> list[str] | None:
-    """读取已缓存 SSE 帧列表（无缓存返回 None）。"""
-    r = await _idem_redis()
-    frames = await r.lrange(f"sse:cache:{review_id}", 0, -1)
-    return frames if frames else None
+    """读取已缓存 SSE 帧列表（无缓存返回 None）。
+
+    P8：Redis 挂 → 返回 None（reconnect 自然走 event:reset 全量重拉路径）。
+    """
+    try:
+        r = await _idem_redis()
+        frames = await r.lrange(f"sse:cache:{review_id}", 0, -1)
+        return frames if frames else None
+    except Exception as e:  # noqa: BLE001
+        await _redis_warn_once("review.sse_cache_read_down", str(e))
+        return None
 
 
 def _parse_sse_seq(frame: str) -> int:
@@ -214,15 +248,18 @@ async def stream_score(
                 if _parse_sse_seq(fr) > last:
                     yield fr
             return
+        seq = 0
         try:
             async with session_factory() as s:
                 async for frame in svc.stream_score(
                     s, review_id=review_id, expert_id=expert_id
                 ):
+                    seq = max(seq, _parse_sse_seq(frame))
                     await _cache_sse_frame(review_id, frame)
                     yield frame
-        except Exception as e:  # noqa: BLE001  流中断不吞，记录并结束
+        except Exception as e:  # noqa: BLE001  已开流不吞：error 帧收尾，前端提示重试
             logger.warning("review.stream_error", review_id=review_id, error=str(e))
+            yield sse_event("error", {"detail": "评分流中断，请重试"}, seq + 1)
 
     return StreamingResponse(
         gen(),
@@ -238,112 +275,122 @@ async def stream_chat(
     session: AsyncSession = Depends(get_db_session),
     user: User = Depends(require_roles(Role.REVIEW_EXPERT, Role.ADMIN)),
 ) -> StreamingResponse:
+    # P8 异常兜底：断路器 OPEN → 503（与评分流对齐），前端仅 503 才降级纯人工评审
+    if get_client().circuit_state == "OPEN":
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI 推理引擎暂不可用（断路器 OPEN），请切换人工评审",
+        )
     expert_id = await _resolve_expert(session, user)
 
     async def gen():
-        async with session_factory() as s:
-            review = await s.get(svc.ExpertReview, review_id)
-            if review is None or review.expert_id != expert_id:
-                yield sse_event("error", {"detail": "评审记录不存在或非本人任务"}, 0)
-                return
-            # agent 模式（function calling）：检索由 LLM 自主决策（调 retrieve_knowledge 工具），
-            # 不再固定预检索；bid/dimension 供工具执行器组装上下文（retrieve 需 lot_id/bid_id，
-            # rubric 工具需 dimension）。决策轮事件静默（保三发对齐契约），作答轮统一走
-            # splitter 三发，full 仅存 answer 段（思考不进对话历史，避免污染摘要）。
-            bid = await s.get(BidDocument, review.bid_id)
-            dimension = await s.get(ScoringDimension, review.dimension_id)
-            # 回指意图归队依赖：最近 user 消息原文（倒序，此时尚未写入当前问题）。
-            # _classify_intent 的 history 参数用它把"就这个/还有呢"延续到上一轮意图。
-            recent_user = (
-                await s.scalars(
-                    select(ConversationMessage)
-                    .where(ConversationMessage.review_id == review_id,
-                           ConversationMessage.dimension_id == review.dimension_id,
-                           ConversationMessage.role == "user")
-                    .order_by(ConversationMessage.dim_turn_number.desc())
-                    .limit(3)
+        seq = 1
+        # 契约 meta 首帧提前到 gen 顶部：DB/检索失败时 meta 仍是首帧（评测 §5.1 meta-first）
+        yield sse_event("meta", {
+            "agent": "smart-procurement",
+            "model": settings.deepseek_model,
+            "interface": "POST /reviews/{review_id}/chat",
+            "contract_version": "1.0",
+            "git_sha": "",
+            "knowledge_version": "",
+        }, seq := seq + 1)
+        full = ""
+        # 7.4 cache 字段：DeepSeek 响应带 prompt_cache_hit/miss_tokens，累加透传评测平台按命中价计成本
+        total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+                       "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 0}
+        try:
+            async with session_factory() as s:
+                review = await s.get(svc.ExpertReview, review_id)
+                if review is None or review.expert_id != expert_id:
+                    yield sse_event("error", {"detail": "评审记录不存在或非本人任务"}, seq := seq + 1)
+                    return
+                # agent 模式（function calling）：检索由 LLM 自主决策（调 retrieve_knowledge 工具），
+                # 不再固定预检索；bid/dimension 供工具执行器组装上下文（retrieve 需 lot_id/bid_id，
+                # rubric 工具需 dimension）。决策轮事件静默（保三发对齐契约），作答轮统一走
+                # splitter 三发，full 仅存 answer 段（思考不进对话历史，避免污染摘要）。
+                bid = await s.get(BidDocument, review.bid_id)
+                dimension = await s.get(ScoringDimension, review.dimension_id)
+                # 回指意图归队依赖：最近 user 消息原文（倒序，此时尚未写入当前问题）。
+                # _classify_intent 的 history 参数用它把"就这个/还有呢"延续到上一轮意图。
+                recent_user = (
+                    await s.scalars(
+                        select(ConversationMessage)
+                        .where(ConversationMessage.review_id == review_id,
+                               ConversationMessage.dimension_id == review.dimension_id,
+                               ConversationMessage.role == "user")
+                        .order_by(ConversationMessage.dim_turn_number.desc())
+                        .limit(3)
+                    )
+                ).all()
+                ctx = ToolContext(session=s, review=review, bid=bid, dimension=dimension,
+                                  history=[m.content for m in recent_user])
+                await conversation.add_message(
+                    s, review_id=review_id, dimension_id=review.dimension_id,
+                    role="user", content=body.question,
                 )
-            ).all()
-            ctx = ToolContext(session=s, review=review, bid=bid, dimension=dimension,
-                              history=[m.content for m in recent_user])
-            await conversation.add_message(
-                s, review_id=review_id, dimension_id=review.dimension_id,
-                role="user", content=body.question,
-            )
-            context = await conversation.get_context(
-                s, review_id=review_id, dimension_id=review.dimension_id
-            )
-            # P7.x tools 声明：agent 决策轮 system 声明工具可用与调用约束，LLM 自主决定是否调用
-            prompt = build_chat_prompt(
-                role_context="你是标书评审专家助手，结合标书内容与当前评审上下文回答专家的追问。",
-                context=context, history=[], question=body.question,
-                chunks=None, tools_declared=True,
-            )
-            seq = 1
-            # 契约 meta 首帧（评测 §5.1）
-            yield sse_event("meta", {
-                "agent": "smart-procurement",
-                "model": settings.deepseek_model,
-                "interface": "POST /reviews/{review_id}/chat",
-                "contract_version": "1.0",
-                "git_sha": "",
-                "knowledge_version": "",
-            }, seq := seq + 1)
-            yield sse_event("thinking", {"stage": "CHAT"}, seq := seq + 1)
-            full = ""
-            # 7.4 cache 字段：DeepSeek 响应带 prompt_cache_hit/miss_tokens，累加透传评测平台按命中价计成本
-            total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
-                           "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 0}
-            try:
-                # P7.x：agent 决策轮静默（工具决策不外发 reasoning/answer），作答轮 content
-                # 进 splitter 三发（reasoning/answer/thought 对齐）；三路兜底固定话术无
-                # <thinking> 标签 → 全文当 answer（降级契约不破）
-                async for ev in stream_agent(prompt, CHAT_TOOLS, ctx):
-                    etype = ev["type"]
-                    if etype == "tool_call":
-                        # 契约 tool_call 事件：评测端观测 LLM 决策调用的内部工具 + 检索质量元信息
-                        yield sse_event("tool_call", {
-                            "id": f"tool-{time.time_ns()}",
-                            "name": ev["name"],
-                            "args": ev["args"],
-                            "result": ev["result"],
-                            "status": ev["status"],
-                            "intent": ev["intent"],
-                        }, seq := seq + 1)
-                    elif etype == "answer":
-                        total_usage = dict(ev["usage"])
-                        splitter = ThinkingAnswerSplitter()
-                        for kind, piece in splitter.feed(ev["text"]):
-                            if not piece:
-                                continue
-                            if kind == "reasoning":
-                                yield sse_event("reasoning", {"delta": piece}, seq := seq + 1)
-                            else:
-                                full += piece
-                                yield sse_event("answer", {"delta": piece}, seq := seq + 1)
-                                yield sse_event("thought", {"delta": piece}, seq := seq + 1)
-                        for kind, piece in splitter.flush():
-                            if not piece:
-                                continue
-                            if kind == "reasoning":
-                                yield sse_event("reasoning", {"delta": piece}, seq := seq + 1)
-                            else:
-                                full += piece
-                                yield sse_event("answer", {"delta": piece}, seq := seq + 1)
-                                yield sse_event("thought", {"delta": piece}, seq := seq + 1)
-                    elif etype == "error":
-                        yield sse_event("error", {"detail": ev["message"]}, seq := seq + 1)
-            finally:
-                if full.strip():
-                    await conversation.add_message(
-                        s, review_id=review_id, dimension_id=review.dimension_id,
-                        role="assistant", content=full,
-                    )
-                    await conversation.maybe_summarize(
-                        s, review_id=review_id, dimension_id=review.dimension_id
-                    )
-            yield sse_event("usage", total_usage, seq := seq + 1)
-            yield sse_event("done", {"content": full}, seq := seq + 1)
+                context = await conversation.get_context(
+                    s, review_id=review_id, dimension_id=review.dimension_id
+                )
+                # P7.x tools 声明：agent 决策轮 system 声明工具可用与调用约束，LLM 自主决定是否调用
+                prompt = build_chat_prompt(
+                    role_context="你是标书评审专家助手，结合标书内容与当前评审上下文回答专家的追问。",
+                    context=context, history=[], question=body.question,
+                    chunks=None, tools_declared=True,
+                )
+                yield sse_event("thinking", {"stage": "CHAT"}, seq := seq + 1)
+                try:
+                    # P7.x：agent 决策轮静默（工具决策不外发 reasoning/answer），作答轮 content
+                    # 进 splitter 三发（reasoning/answer/thought 对齐）；三路兜底固定话术无
+                    # <thinking> 标签 → 全文当 answer（降级契约不破）
+                    async for ev in stream_agent(prompt, CHAT_TOOLS, ctx):
+                        etype = ev["type"]
+                        if etype == "tool_call":
+                            # 契约 tool_call 事件：评测端观测 LLM 决策调用的内部工具 + 检索质量元信息
+                            yield sse_event("tool_call", {
+                                "id": f"tool-{time.time_ns()}",
+                                "name": ev["name"],
+                                "args": ev["args"],
+                                "result": ev["result"],
+                                "status": ev["status"],
+                                "intent": ev["intent"],
+                            }, seq := seq + 1)
+                        elif etype == "answer":
+                            total_usage = dict(ev["usage"])
+                            splitter = ThinkingAnswerSplitter()
+                            for kind, piece in splitter.feed(ev["text"]):
+                                if not piece:
+                                    continue
+                                if kind == "reasoning":
+                                    yield sse_event("reasoning", {"delta": piece}, seq := seq + 1)
+                                else:
+                                    full += piece
+                                    yield sse_event("answer", {"delta": piece}, seq := seq + 1)
+                                    yield sse_event("thought", {"delta": piece}, seq := seq + 1)
+                            for kind, piece in splitter.flush():
+                                if not piece:
+                                    continue
+                                if kind == "reasoning":
+                                    yield sse_event("reasoning", {"delta": piece}, seq := seq + 1)
+                                else:
+                                    full += piece
+                                    yield sse_event("answer", {"delta": piece}, seq := seq + 1)
+                                    yield sse_event("thought", {"delta": piece}, seq := seq + 1)
+                        elif etype == "error":
+                            yield sse_event("error", {"detail": ev["message"]}, seq := seq + 1)
+                finally:
+                    if full.strip():
+                        await conversation.add_message(
+                            s, review_id=review_id, dimension_id=review.dimension_id,
+                            role="assistant", content=full,
+                        )
+                        await conversation.maybe_summarize(
+                            s, review_id=review_id, dimension_id=review.dimension_id
+                        )
+                yield sse_event("usage", total_usage, seq := seq + 1)
+                yield sse_event("done", {"content": full}, seq := seq + 1)
+        except Exception as e:  # noqa: BLE001  已开流不吞：error 帧收尾，前端提示重试
+            logger.warning("review.chat_stream_error", review_id=review_id, error=str(e))
+            yield sse_event("error", {"detail": "AI 对话中断，请重试"}, seq := seq + 1)
 
     return StreamingResponse(
         gen(),

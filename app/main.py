@@ -10,15 +10,19 @@ import asyncio
 import sys
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+import structlog
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.api import contracts
 from app.api.v1 import api_v1_router
 from app.core import database, logging, milvus, neo4j
 from app.core.config import settings
+from app.core.errors import is_dependency_error
 from app.core.middleware import RequestIDMiddleware
 from app.services import config_service
+
+logger = structlog.get_logger(__name__)
 
 # 硬依赖（失败即 exit(1)）
 HARD_DEPENDENCIES = ("mysql", "neo4j", "redis")
@@ -114,6 +118,26 @@ app.add_middleware(RequestIDMiddleware)
 app.include_router(api_v1_router)
 # 标准契约清单端点（统一 GET /api/contracts，平台脚手架发现用）
 app.include_router(contracts.router, prefix="/api")
+
+
+# ==================== P8 异常兜底：全局 exception handler ====================
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """兜底 handler：外部依赖故障 → 503，其他未捕获异常 → 500（JSON 响应体）。
+
+    失败偏置：中间件挂（Redis/Neo4j/MinIO/MySQL/Milvus）返回"依赖暂不可用"
+    让前端走降级 UI；真正服务器 bug 返回 500 并落 error 日志。
+
+    边界：StreamingResponse 响应头发出后抛的异常不被捕获（只能断流），
+    由各 SSE 端点 gen() 内 try/except 兜底（见 reviews.py）。
+    """
+    if is_dependency_error(exc):
+        logger.warning("http.dependency_error", path=request.url.path, error=str(exc))
+        return JSONResponse(status_code=503, content={"detail": "核心依赖暂不可用，请稍后重试"})
+    logger.error("http.unhandled", path=request.url.path, exc_info=exc)
+    return JSONResponse(status_code=500, content={"detail": "服务器内部错误，请稍后重试"})
 
 
 @app.get("/health/live", tags=["health"], summary="存活探针")

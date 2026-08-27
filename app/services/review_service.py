@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.llm.deepseek_client import CircuitOpenError, get_client
 from app.ai.llm.prompts import ThinkingAnswerSplitter, build_score_prompt
 from app.ai.llm.text_cleaner import clean_bid_text, redact_pii
+from app.ai.rag.degradation import DegradationHint
 from app.ai.rag.retriever import retrieve_with_meta
 from app.core.config import settings
 from app.core.crypto import generate_id
@@ -50,6 +51,25 @@ def _clean_structured_data(data: dict | None) -> dict | None:
 _RE_SCORE = __import__("re").compile(r"分数\s*[:：]\s*(\d+(?:\.\d+)?)")
 # 兜底：LLM 未按 `分数: X` 输出时，抓 "X分 / Y分" 里的 X（如 "19.0分 / 30.0分"）
 _RE_TOTAL_SCORE = __import__("re").compile(r"(\d+(?:\.\d+)?)\s*分\s*[/／]\s*\d+(?:\.\d+)?\s*分")
+
+
+def _extract_score(full_text: str, max_score: float) -> tuple[float | None, str | None]:
+    """从 LLM 输出提取最终分数并校验范围（P8 答非所问兜底）。
+
+    取末行 `分数: X`（_RE_TOTAL_SCORE 兜底），校验 0<=v<=max_score。
+    返回 (score, hint)：空输出/无分/越界 → score=None + 对应 DegradationHint；
+    正常 → (v, None)。score=None 时前端应展示 hint 提示人工评分，而非把 null
+    当有效分数落库。
+    """
+    if not (full_text or "").strip():
+        return None, DegradationHint.EMPTY_OUTPUT
+    nums = _RE_SCORE.findall(full_text) or _RE_TOTAL_SCORE.findall(full_text)
+    if not nums:
+        return None, DegradationHint.NO_SCORE
+    v = float(nums[-1])  # 末行优先：修"取第一个 分数:" 的 bug（LLM 理由正文里可能先出现示例分）
+    if v < 0 or v > max_score:
+        return None, DegradationHint.SCORE_OUT_OF_RANGE
+    return v, None
 
 
 class LotNotFoundError(ValueError):
@@ -299,17 +319,19 @@ async def stream_score(
         yield sse_event("done", {"content": full_text}, seq := seq + 1)
         return
 
-    # 解析分数（prompt 要求末行 `分数: X`，_RE_TOTAL_SCORE 兜底）→ score 事件
-    m = _RE_SCORE.search(full_text) or _RE_TOTAL_SCORE.search(full_text)
-    score_val = float(m.group(1)) if m else None
+    # 解析分数（prompt 要求末行 `分数: X`，_RE_TOTAL_SCORE 兜底）+ 范围校验 → score 事件
+    # P8：空输出/无分/越界 → score=None + hint（人工评分兜底），杜绝越界分/负分落库
+    score_val, score_hint = _extract_score(full_text, float(dim.max_score or 0))
     yield sse_event(
         "score",
-        {"score": score_val, "comment": full_text[:2000]},
+        {"score": score_val, "comment": full_text[:2000], "hint": score_hint},
         seq := seq + 1,
     )
     yield sse_event("usage", total_usage, seq := seq + 1)
     # done 带结构化分数（§5.1 扩展：评测端直接取 score，不依赖正则；解析不到为 null）
-    yield sse_event("done", {"content": full_text, "score": score_val}, seq := seq + 1)
+    yield sse_event(
+        "done", {"content": full_text, "score": score_val, "hint": score_hint}, seq := seq + 1
+    )
 
 
 # ==================== P3.4：暂存 / 提交 / 锁定 ====================

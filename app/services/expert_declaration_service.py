@@ -264,9 +264,15 @@ async def declare(
                     relation_detail=detail,
                 )
             )
-            await neo4j_sync.upsert_conflict_relation(
-                rel, expert_id=expert_id, supplier_id=c.get("supplier_id")
-            )
+            # P8 异常兜底：Neo4j 同步失败仅告警（图暂不可用），不回滚 MySQL 申报事务——
+            # 申报记录是权威事实，图关系同步由 worker reconcile 补（MERGE 幂等）
+            try:
+                await neo4j_sync.upsert_conflict_relation(
+                    rel, expert_id=expert_id, supplier_id=c.get("supplier_id")
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("declare.graph_sync_failed", assignment_id=assignment_id,
+                               expert_id=expert_id, relation=rel, error=str(e))
         assignment.status = AssignmentStatus.CONFLICT_DECLARED
         await session.commit()
 

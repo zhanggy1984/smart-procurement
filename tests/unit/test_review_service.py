@@ -63,6 +63,61 @@ def test_score_regex_no_match_returns_none():
     assert _RE_TOTAL_SCORE.search("方案合理，建议通过。") is None
 
 
+# ==================== P8 _extract_score：LLM 答非所问/越界/空输出校验 ====================
+
+
+def _extract(text, max_score=30):
+    return svc._extract_score(text, max_score)
+
+
+def test_extract_score_in_range():
+    """范围内分数正常提取（含全角冒号）。"""
+    v, hint = _extract("方案完整。\n分数: 23.5", 30)
+    assert v == 23.5 and hint is None
+
+
+def test_extract_score_out_of_range_returns_none_hint():
+    """越界（>max_score）→ score=None + SCORE_OUT_OF_RANGE（防 LLM 输出超上限分落库）。"""
+    from app.ai.rag.degradation import DegradationHint
+
+    v, hint = _extract("方案完整。\n分数: 100", 20)
+    assert v is None and hint == DegradationHint.SCORE_OUT_OF_RANGE
+    # 负号开头无法被 _RE_SCORE/_RE_TOTAL_SCORE 提取（\d+ 不匹配 '-'）→ 归"未识别有效分数"，
+    # 同样是 score=None + 人工评分兜底（降级路径一致，仅 hint 文案不同）
+    v, hint = _extract("方案完整。\n分数: -5", 20)
+    assert v is None and hint == DegradationHint.NO_SCORE
+
+
+def test_extract_score_empty_text_hint():
+    """空输出 → EMPTY_OUTPUT（LLM 未返回任何内容）。"""
+    from app.ai.rag.degradation import DegradationHint
+
+    v, hint = _extract("", 30)
+    assert v is None and hint == DegradationHint.EMPTY_OUTPUT
+    v, hint = _extract("   \n  ", 30)
+    assert v is None and hint == DegradationHint.EMPTY_OUTPUT
+
+
+def test_extract_score_last_line_wins():
+    """取末行 `分数: X`：理由正文先出现示例分时，最终分以末行为准（修首匹配 bug）。"""
+    v, _ = _extract("理由中先提到\n分数: 5\n（示例分）\n最终结论\n分数: 25", 30)
+    assert v == 25.0
+
+
+def test_extract_score_fallback_total():
+    """未按 `分数: X` 输出 → _RE_TOTAL_SCORE 兜底（`X分 / Y分`）。"""
+    v, hint = _extract("技术方案总分：7.5 + 6.0 + 5.5 = 19.0分 / 30.0分", 30)
+    assert v == 19.0 and hint is None
+
+
+def test_extract_score_no_match_hint():
+    """LLM 未输出任何分数 → NO_SCORE（人工评分提示）。"""
+    from app.ai.rag.degradation import DegradationHint
+
+    v, hint = _extract("方案合理，建议通过。", 30)
+    assert v is None and hint == DegradationHint.NO_SCORE
+
+
 @pytest.mark.asyncio
 async def test_create_review_rejects_unfrozen():
     """bid 未 FROZEN → BidNotFrozenError（400 语义）。"""
@@ -150,3 +205,53 @@ async def test_stream_score_tool_call_meta(monkeypatch):
     assert tool["semantic_ok"] is True
     assert tool["hint"] is None
     assert tool["result"] == [{"chunk_id": "c1", "chapter_title": "技术方案", "score": 0.8}]
+
+
+@pytest.mark.asyncio
+async def test_stream_score_out_of_range_score_null_hint(monkeypatch):
+    """LLM 输出越界分（max=20 却给 100）→ score=None + SCORE_OUT_OF_RANGE hint。
+
+    P8 答非所问兜底：越界分不落库，score/done 事件带 hint 让前端提示人工评分。
+    """
+    from app.ai.rag.degradation import DegradationHint
+
+    session = AsyncMock()
+    review = MagicMock(review_id="R1", expert_id="E1", dimension_id="D1", bid_id="B1")
+    dim = MagicMock(dimension_id="D1", name="技术方案", max_score=20)
+    bid = MagicMock(bid_id="B1", lot_id="LOT-1", bid_amount=None, structured_data=None)
+    session.get.side_effect = [review, dim, bid]
+
+    criterion = MagicMock(name="架构合理性", max_score=10, scoring_rubric="分层清晰", description="")
+    criteria_res = MagicMock()
+    criteria_res.all.return_value = [criterion]
+    session.scalars.return_value = criteria_res
+
+    result = RetrievalResult(
+        chunk_id="c1", bid_id="B1", lot_id="LOT-1",
+        content="标书技术方案", chapter_title="技术方案", page_no=3,
+        score=0.8, source="vector",
+    )
+    meta = {"source_count": 1, "max_score": 0.8, "semantic_ok": True, "confidence_band": "high"}
+
+    async def _fake_retrieve(query, **kwargs):
+        return [result], None, meta
+
+    monkeypatch.setattr(svc, "retrieve_with_meta", _fake_retrieve)
+
+    async def _fake_stream(prompt, max_tokens=2048):
+        yield "<thinking>该方案超出满分上限。</thinking>", None
+        yield "<answer>方案完整。\n分数: 100</answer>", None
+
+    client = MagicMock()
+    client.chat_stream = _fake_stream
+    monkeypatch.setattr(svc, "get_client", lambda: client)
+
+    frames = [f async for f in svc.stream_score(session, review_id="R1", expert_id="E1")]
+    score_ev = [fr for fr in frames if "\nevent: score\n" in fr][0]
+    score_data = json.loads(score_ev.split("\nevent: score\ndata: ")[1].split("\n\n")[0])
+    assert score_data["score"] is None
+    assert score_data["hint"] == DegradationHint.SCORE_OUT_OF_RANGE
+    done_ev = [fr for fr in frames if "\nevent: done\n" in fr][0]
+    done_data = json.loads(done_ev.split("\nevent: done\ndata: ")[1].split("\n\n")[0])
+    assert done_data["score"] is None
+    assert done_data["hint"] == DegradationHint.SCORE_OUT_OF_RANGE

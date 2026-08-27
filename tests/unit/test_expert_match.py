@@ -1,10 +1,12 @@
 """P7.2 ExpertMatchService 纯函数单元测试（task.md：5 用例）。
 
 覆盖 _score_candidates 多维加权排序、_assign_dimensions 维度轮转与 min_per_dim
-补足。冲突检测（_find_conflicts）依赖 Neo4j，属集成测试范围。
+补足。冲突检测（_conflicts_with_status）依赖 Neo4j，P8 降级路径在此覆盖。
 """
 
 from __future__ import annotations
+
+import pytest
 
 from app.services.expert_match_service import _assign_dimensions, _score_candidates
 
@@ -68,3 +70,41 @@ def test_assign_dimensions_empty():
 
 
 from unittest.mock import MagicMock
+
+
+# ==================== P8 异常兜底：Neo4j 图检降级 ====================
+
+
+@pytest.mark.asyncio
+async def test_conflicts_with_status_returns_graph_error(monkeypatch):
+    """Neo4j 挂 → _conflicts_with_status 返回 ({}, True)（图检跳过，匹配降级）。"""
+    import app.services.expert_match_service as m
+
+    def _boom(*a, **kw):
+        raise RuntimeError("neo4j down")
+
+    monkeypatch.setattr(m.neo4j, "get_driver", _boom)
+    conflicts, graph_error = await m._conflicts_with_status(["E1", "E2"], ["S1"])
+    assert conflicts == {}
+    assert graph_error is True
+
+
+@pytest.mark.asyncio
+async def test_find_conflicts_degrades_on_neo4j_down(monkeypatch):
+    """薄封装 _find_conflicts：图检降级时返回空 dict（调用方获兼容签名）。"""
+    import app.services.expert_match_service as m
+
+    async def _fail(eids, sids):
+        return {}, True
+
+    monkeypatch.setattr(m, "_conflicts_with_status", _fail)
+    assert await m._find_conflicts(["E1"], ["S1"]) == {}
+
+
+@pytest.mark.asyncio
+async def test_conflicts_with_status_empty_experts():
+    """空专家列表 → 不触 Neo4j，直接 ({}, False)。"""
+    import app.services.expert_match_service as m
+
+    conflicts, graph_error = await m._conflicts_with_status([], ["S1"])
+    assert conflicts == {} and graph_error is False

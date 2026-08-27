@@ -254,6 +254,44 @@ async def test_agent_round2_error(monkeypatch):
     assert [e["type"] for e in got] == ["tool_call", "error"]
 
 
+# ==================== P8 空回复兜底：_answer_or_error ====================
+
+
+@pytest.mark.asyncio
+async def test_agent_empty_direct_answer_emits_error(monkeypatch):
+    """LLM 直接答但 content 空 → error 帧（非空白 answer，前端不出现空白气泡）。"""
+    events = [
+        {"type": "content", "delta": "   "},  # 全空白 content
+        {"type": "content", "delta": ""},
+    ]
+    client = _client(events)
+    monkeypatch.setattr(agent, "get_client", lambda: client)
+    got = [e async for e in stream_agent(_messages("你好"), CHAT_TOOLS, _ctx())]
+    assert [e["type"] for e in got] == ["error"]
+    assert "AI 未生成有效回复" in got[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_agent_empty_round2_emits_error(monkeypatch):
+    """tool 命中但 round2 作答空 → [tool_call, error]（决策已执行、作答空则提示重试）。"""
+    events = [
+        {"type": "tool_call", "tool_calls": [
+            {"id": "t1", "type": "function",
+             "function": {"name": "retrieve_knowledge", "arguments": '{"query": "技术方案"}'}},
+        ]},
+    ]
+    client = _client(events, round2_deltas=["", "  "])  # round2 全空增量
+    monkeypatch.setattr(agent, "get_client", lambda: client)
+
+    async def _fake_retrieve(ctx, query):
+        return {"source_count": 2, "context": "[来源1] x", "confidence_band": "high"}
+
+    monkeypatch.setattr(agent, "execute_retrieve_knowledge", _fake_retrieve)
+    got = [e async for e in stream_agent(_messages("技术方案怎么样"), CHAT_TOOLS, _ctx())]
+    assert [e["type"] for e in got] == ["tool_call", "error"]
+    assert "AI 未生成有效回复" in got[1]["message"]
+
+
 # ==================== deepseek_client.chat_stream_agent tool_calls 解析 ====================
 
 

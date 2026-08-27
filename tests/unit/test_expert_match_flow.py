@@ -56,12 +56,13 @@ async def test_match_experts_excludes_conflict_and_persists():
         _cand("EXP-3", ["软件开发"], exp=20, name="持股专家"),  # 与 S1 有持股关系
     ]
     with patch("app.services.expert_match_service._load_candidates", new=AsyncMock(return_value=cands)), \
-         patch("app.services.expert_match_service._find_conflicts",
-               new=AsyncMock(return_value={"EXP-3": ["HOLDS_SHARE"]})), \
+         patch("app.services.expert_match_service._conflicts_with_status",
+               new=AsyncMock(return_value=({"EXP-3": ["HOLDS_SHARE"]}, False))), \
          patch("app.services.expert_match_service._load_review_quality", new=AsyncMock(return_value={})):
         res = await match_experts(session, lot_id="LOT-1", tags=["软件开发", "云计算"], operator_id="U-1")
 
     assert res["excluded_conflict"] == ["EXP-3"]
+    assert res["graph_error"] is False
     assigned_ids = [a["expert_id"] for a in res["assigned"]]
     assert "EXP-3" not in assigned_ids
     assert set(assigned_ids) == {"EXP-1", "EXP-2"}
@@ -95,12 +96,41 @@ async def test_match_experts_reuses_existing_assignment():
 
     cands = [_cand("EXP-1", ["软件开发"])]
     with patch("app.services.expert_match_service._load_candidates", new=AsyncMock(return_value=cands)), \
-         patch("app.services.expert_match_service._find_conflicts", new=AsyncMock(return_value={})), \
+         patch("app.services.expert_match_service._conflicts_with_status",
+               new=AsyncMock(return_value=({}, False))), \
          patch("app.services.expert_match_service._load_review_quality", new=AsyncMock(return_value={})):
         await match_experts(session, lot_id="LOT-1", tags=["软件开发"], operator_id="U-1")
 
     assert existing.status == "PENDING_DECLARATION"
     assert session.add.call_count == 0  # 全部复用
+
+
+@pytest.mark.asyncio
+async def test_match_experts_graph_error_flag(monkeypatch):
+    """Neo4j 图检降级（graph_error=True）→ 匹配流程继续 + 返回透出降级标志。"""
+    session = AsyncMock()
+    lot = _mk_lot()
+    project = MagicMock()
+    project.region = "华中"
+    session.get.side_effect = [lot, project, None]  # Lot, Project, LotExpertCriteria=None
+
+    sup_result = MagicMock()
+    sup_result.all.return_value = ["S1"]
+    dim_result = MagicMock()
+    dim_result.all.return_value = [MagicMock(dimension_id="D1")]
+    session.scalars.side_effect = [sup_result, dim_result]
+    session.scalar.return_value = None  # 均新建
+
+    cands = [_cand("EXP-1", ["软件开发"])]
+    with patch("app.services.expert_match_service._load_candidates", new=AsyncMock(return_value=cands)), \
+         patch("app.services.expert_match_service._conflicts_with_status",
+               new=AsyncMock(return_value=({}, True))), \
+         patch("app.services.expert_match_service._load_review_quality", new=AsyncMock(return_value={})):
+        res = await match_experts(session, lot_id="LOT-1", tags=["软件开发"], operator_id="U-1")
+
+    assert res["graph_error"] is True  # 透出降级标志
+    assert "EXP-1" in {a["expert_id"] for a in res["assigned"]}  # 流程照常继续
+    session.commit.assert_awaited_once()
 
 
 @pytest.mark.asyncio

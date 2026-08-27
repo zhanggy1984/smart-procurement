@@ -170,19 +170,42 @@ async def _retrieve_internal(
     路3 结构化结果（无 chunk_id）附加在列表尾部（source='structured'）。
     Milvus 检索超时（SEMANTIC_TIMEOUT_SECONDS）→ semantic_ok=False，只走关键词+结构化。
     """
-    # 路1：query 向量化 + Milvus 检索（10s 超时，超时降级到关键词+结构化）
-    qvec = (await get_embedder().embed([query]))[0]
+    # 路1：query 向量化 + Milvus 检索（10s 超时，超时/故障降级到关键词+结构化）
+    # 异常兜底（P8）：BGE-M3 / Milvus 任一故障 → semantic_ok=False 走关键词+结构化，
+    # 不让单一中间件故障整体打断检索（失败偏置而非 fail-stop）。
     semantic_ok = True
+    qvec = None
     try:
-        hits_v = await asyncio.wait_for(
-            asyncio.to_thread(_search_vector, qvec, lot_id, bid_id, 20),
+        qvec = (await get_embedder().embed([query]))[0]
+    except Exception as e:  # noqa: BLE001  embedding 服务不可用
+        semantic_ok = False
+        logger.warning("retriever.embedding_failed", lot_id=lot_id, bid_id=bid_id, error=str(e))
+    if qvec is None:
+        hits_v = []
+    else:
+        try:
+            hits_v = await asyncio.wait_for(
+                asyncio.to_thread(_search_vector, qvec, lot_id, bid_id, 20),
+                timeout=SEMANTIC_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            semantic_ok = False
+            hits_v = []
+            logger.warning("retriever.semantic_timeout", lot_id=lot_id, bid_id=bid_id)
+        except Exception as e:  # noqa: BLE001  非超时故障（连接/gRPC 等）
+            semantic_ok = False
+            hits_v = []
+            logger.warning("retriever.semantic_failed", lot_id=lot_id, bid_id=bid_id, error=str(e))
+    # 关键词路拉全量 chunk：Milvus query 挂也降级（结构化路仍可用）
+    try:
+        all_chunks = await asyncio.wait_for(
+            asyncio.to_thread(_query_all_chunks, lot_id, bid_id),
             timeout=SEMANTIC_TIMEOUT_SECONDS,
         )
-    except TimeoutError:
+    except Exception as e:  # noqa: BLE001  含 TimeoutError
         semantic_ok = False
-        hits_v = []
-        logger.warning("retriever.semantic_timeout", lot_id=lot_id, bid_id=bid_id)
-    all_chunks = await asyncio.to_thread(_query_all_chunks, lot_id, bid_id)
+        all_chunks = []
+        logger.warning("retriever.chunks_failed", lot_id=lot_id, bid_id=bid_id, error=str(e))
 
     # 路2：关键词（评分标准术语 + query 关键短语）
     terms: list[str] = []

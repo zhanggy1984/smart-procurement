@@ -87,3 +87,31 @@ async def test_declare_not_found(session):
     session.get.return_value = None
     with pytest.raises(AssignmentNotFoundError):
         await declare(session, assignment_id=999, expert_id="EXP-1", confirmations=[])
+
+
+@pytest.mark.asyncio
+async def test_declare_conflict_neo4j_sync_failure_still_commits(session):
+    """Neo4j 同步失败（upsert_conflict_relation 抛异常）→ 申报仍 CONFLICT_DECLARED + 提交。
+
+    P8 异常兜底：图同步仅告警，不回滚 MySQL 申报事务——申报记录是权威事实，
+    图关系由 worker reconcile 幂等补齐。
+    """
+    assignment = MagicMock()
+    assignment.expert_id = "EXP-1"
+    assignment.status = "PENDING_DECLARATION"
+    assignment.lot_id = "LOT-1"
+    assignment.id = 10
+    session.get.return_value = assignment
+
+    async def _boom(rel, *, expert_id, supplier_id):
+        raise RuntimeError("neo4j down")
+
+    with patch("app.services.expert_declaration_service.notification.send_to_expert", new=AsyncMock()), \
+         patch("app.services.neo4j_sync.upsert_conflict_relation", new=_boom), \
+         patch("app.services.expert_declaration_service._supplement", new=AsyncMock(return_value=None)):
+        res = await declare(session, assignment_id=10, expert_id="EXP-1",
+                            confirmations=[{"supplier_id": "S1", "has_conflict": True,
+                                            "relation_type": "HOLDS_SHARE"}])
+    assert res["status"] == "CONFLICT_DECLARED"
+    assert res["declared_conflicts"] == ["S1"]
+    session.commit.assert_awaited_once()  # Neo4j 失败不回滚 MySQL 事务

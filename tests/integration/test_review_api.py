@@ -216,10 +216,11 @@ async def test_stream_chat_with_fake_llm(client, pm_headers, exp_headers, lot_fa
     names = [e["event"] for e in events]
     assert names[0] == "meta"  # 契约 meta 首帧
     assert names[-1] == "done"
-    # 契约双发：每个 delta 同时透出 reasoning/answer，旧 thought 保留
-    assert names.count("thought") == 2  # 两个 delta
-    assert names.count("reasoning") == 2
-    assert names.count("answer") == 2
+    # 契约三发对齐：agent_loop 作答轮聚合增量后产单个 answer 帧 → 切分一次
+    # （reasoning==answer==thought 各 1，verify_sp_e2e 的对齐断言在真实流上验）
+    assert names.count("thought") == 1
+    assert names.count("reasoning") == 1
+    assert names.count("answer") == 1
     assert "usage" in names  # usage 事件（聚合 mock 的 usage）
     # 对话历史已落库
     from sqlalchemy import text
@@ -229,3 +230,41 @@ async def test_stream_chat_with_fake_llm(client, pm_headers, exp_headers, lot_fa
             "SELECT COUNT(*) FROM conversation_message WHERE review_id=:r"),
             {"r": review_id})).scalar()
     assert n == 2  # user + assistant
+
+
+# ==================== P8 异常兜底：chat 503 / SSE error 帧 ====================
+
+
+@pytest.mark.asyncio
+async def test_chat_returns_503_when_circuit_open(client, exp_headers):
+    """断路器 OPEN → chat 503（与评分流对齐，前端仅 503 才降级纯人工评审）。"""
+    fake = MagicMock()
+    fake.circuit_state = "OPEN"
+    with patch("app.api.v1.reviews.get_client", return_value=fake):
+        resp = await client.post("/api/v1/reviews/ITEST-R-NOTEXIST/chat",
+                                 headers=exp_headers, json={"question": "任何问题"})
+    assert resp.status_code == 503
+    assert "AI" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_score_stream_error_frame_on_service_failure(client, pm_headers, exp_headers, lot_factory, bid_factory, set_bid_parsed):
+    """评分服务中途故障 → gen() 补 error 帧收尾（前端提示重试，不静默断流）。"""
+    lot, bids = await _frozen_lot(client, pm_headers, lot_factory, bid_factory, set_bid_parsed,
+                                  amounts=[100, 120, 80])
+    price_dim = await _dim_id(client, pm_headers, lot["lot_id"], "报价")
+    r = await client.post("/api/v1/reviews", headers=exp_headers,
+                          json={"bid_id": bids[0], "dimension_id": price_dim})
+    review_id = r.json()["review_id"]
+
+    async def _broken_score(session, *, review_id, expert_id):
+        raise RuntimeError("评分服务故障")
+        yield  # pragma: no cover  保持 async generator 身份
+
+    with patch("app.api.v1.reviews.svc.stream_score", new=_broken_score):
+        async with client.stream("POST", f"/api/v1/reviews/{review_id}/score", headers=exp_headers) as sr:
+            assert sr.status_code == 200
+            lines = [ln async for ln in sr.aiter_lines()]
+    events = _parse_sse(lines)
+    assert events[-1]["event"] == "error"
+    assert events[-1]["data"]["detail"] == "评分流中断，请重试"

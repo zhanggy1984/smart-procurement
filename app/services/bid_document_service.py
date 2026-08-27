@@ -157,7 +157,12 @@ async def upload_bid(
     await session.commit()
     await session.refresh(bid)
 
-    signed = await asyncio.to_thread(presign_url, client, object_name)
+    # P8 异常兜底：presign 失败 → signed=None（DB 已提交成功，不能再整体 500 让前端误判失败重传）
+    try:
+        signed = await asyncio.to_thread(presign_url, client, object_name)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("bid.upload_presign_failed", bid_id=bid_id, error=str(e))
+        signed = None
     logger.info(
         "bid.uploaded",
         bid_id=bid_id,
@@ -176,7 +181,11 @@ async def get_bid(session: AsyncSession, bid_id: str) -> tuple[BidDocument, Opti
         raise BidNotFoundError(f"标书不存在: {bid_id}")
     signed = None
     if bid.file_url:
-        signed = await asyncio.to_thread(presign_url, get_minio_client(), bid.file_url)
+        # P8 异常兜底：MinIO 挂/超时 → signed=None（前端"文件暂不可用"），不整体 500
+        try:
+            signed = await asyncio.to_thread(presign_url, get_minio_client(), bid.file_url)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("bid.presign_failed", bid_id=bid_id, error=str(e))
     return bid, signed
 
 

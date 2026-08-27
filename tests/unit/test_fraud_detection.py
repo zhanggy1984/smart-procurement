@@ -66,6 +66,41 @@ def test_faiss_similar_pairs():
     assert any({"a1", "a2"} <= {pp["chunk_a"], pp["chunk_b"]} for pp in pairs) or pairs[0]["score"] > 0.8
 
 
+# ==================== P8 异常兜底：Neo4j 图检降级 ====================
+
+
+@pytest.mark.asyncio
+async def test_graph_check_degrades_on_neo4j_down(monkeypatch):
+    """Neo4j 挂 → _graph_check 返回 (0, [GRAPH_UNAVAILABLE])（图检跳过非 500）。"""
+    import app.services.fraud_detection_service as fd
+
+    def _boom(*a, **kw):
+        raise RuntimeError("neo4j down")
+
+    monkeypatch.setattr(fd.neo4j, "get_driver", _boom)
+    score, ev = await fd._graph_check(["S1", "S2"])
+    assert score == 0
+    assert ev[0]["type"] == "GRAPH_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_deep_graph_check_degrades_on_neo4j_down(monkeypatch):
+    """Neo4j 挂 → _deep_graph_check 返回 (0, [GRAPH_UNAVAILABLE])。
+
+    marker 项无 rel key → deep_detection 一票否决 `ev.get("rel")` 不误触。
+    """
+    import app.services.fraud_detection_service as fd
+
+    def _boom(*a, **kw):
+        raise RuntimeError("neo4j down")
+
+    monkeypatch.setattr(fd.neo4j, "get_driver", _boom)
+    score, ev = await fd._deep_graph_check(["S1", "S2"])
+    assert score == 0
+    assert ev[0]["type"] == "GRAPH_UNAVAILABLE"
+    assert "rel" not in ev[0]  # 无 rel key，一票否决判定安全
+
+
 def test_faiss_similar_pairs_single_chunk():
     """单 chunk → 无对。"""
     chunks = [{"chunk_id": "a1", "bid_id": "BID-A", "embedding": [1.0, 0.0]}]
