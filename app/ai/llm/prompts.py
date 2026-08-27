@@ -137,6 +137,37 @@ def _score_system(dimension_name: str, max_score: float, rubric: str) -> str:
     )
 
 
+def _retrieval_meta_block(meta: dict | None) -> str:
+    """置信度声明段（评分模式）：仅低置信（none/low）或存在降级提示时注入，空则返回空串。
+
+    低置信/降级时 LLM 需在评分理由中如实指出依据缺口、不编造标书未明确内容
+    （对齐 good-question 把 confidence_band 放 tool 消息让 LLM 低置信如实说明的设计）。
+    只拼进 user 消息而非 system——置信度每请求不同，放 system 会破坏 DeepSeek
+    prompt cache（P7.x 的 system 常量缓存优化）；高置信不注入，进一步少扰动缓存。
+    """
+    if not meta:
+        return ""
+    band = meta.get("confidence_band")
+    hint = meta.get("hint")
+    if band not in ("none", "low") and not hint:
+        return ""
+    parts = []
+    if meta.get("source_count") is not None:
+        parts.append(f"命中 {meta['source_count']} 条依据")
+    ms = meta.get("max_score")
+    if ms is not None:
+        parts.append(f"语义相似度最高 {ms:.2f}")
+    if band:
+        parts.append(f"置信档位 {band}")
+    head = "，".join(parts)
+    hint_txt = f"；存在降级提示：{hint}" if hint else ""
+    return (
+        f"<retrieval_meta>本次检索元信息：{head}{hint_txt}。"
+        "若置信档位为 none/low 或存在降级提示，说明检索依据可能不足，"
+        "评分理由中须如实指出依据缺口，不得编造标书未明确的内容。</retrieval_meta>\n"
+    )
+
+
 def build_score_prompt(
     *,
     dimension_name: str,
@@ -144,10 +175,13 @@ def build_score_prompt(
     rubric: str,
     chunks: list[str],
     structured_data: dict | None = None,
+    retrieval_meta: dict | None = None,
 ) -> list[dict]:
     """评分模式 prompt（System + User）。chunks 包 `<bid_content>`、structured_data 包 `<structured_data>`。
 
     rubric 为评分标准文本（ScoringCriterion 拼装）；chunks 为检索到的证据原文。
+    retrieval_meta（可选，retriever.retrieve_with_meta return_meta 产物）低置信时
+    注入 `<retrieval_meta>` 段（详见 _retrieval_meta_block）。
     输入侧检测：标书数据（chunks + structured_data）命中注入模式仅告警——数据已由
     `<bid_content>`/`<structured_data>` 定界 + `<input_data>` 声明，不前置声明避免污染数据区。
     返回 openai messages 列表。
@@ -160,8 +194,11 @@ def build_score_prompt(
     structured_block = (
         f"<structured_data>\n{structured_data}\n</structured_data>" if structured_data else ""
     )
+    retrieval_block = _retrieval_meta_block(retrieval_meta)
     user = (
-        f"<bid_content>\n{body}\n</bid_content>\n{structured_block}\n\n"
+        f"<bid_content>\n{body}\n</bid_content>\n"
+        f"{retrieval_block}"
+        f"{structured_block}\n\n"
         f"请针对「{dimension_name}」维度按评分标准打分。"
     )
     return [

@@ -252,3 +252,67 @@ def test_thinking_answer_splitter_stream():
     out = _feed_all(["<thinking>半截思考"])
     assert "".join(d for k, d in out if k == "reasoning") == "半截思考"
     assert "".join(d for k, d in out if k == "answer") == ""
+
+
+# ==================== P7.x retrieval_meta：置信度进 prompt（契约标准化） ====================
+
+
+def test_retrieval_meta_low_confidence_injected():
+    """低置信（low）→ user 消息注入 <retrieval_meta> 段，含命中数/相似度/档位。"""
+    msgs = build_score_prompt(
+        dimension_name="技术方案", max_score=30, rubric="架构合理性",
+        chunks=["依据片段"],
+        retrieval_meta={"source_count": 1, "max_score": 0.55, "confidence_band": "low",
+                        "semantic_ok": True, "hint": None},
+    )
+    user = msgs[1]["content"]
+    assert "<retrieval_meta>" in user and "</retrieval_meta>" in user
+    assert "命中 1 条依据" in user
+    assert "置信档位 low" in user
+    assert "如实指出依据缺口" in user
+
+
+def test_retrieval_meta_none_band_with_hint():
+    """none 档（低于拒答阈值）+ 降级提示 → 注入，提示文案透传。"""
+    msgs = build_score_prompt(
+        dimension_name="技术方案", max_score=30, rubric="架构合理性",
+        chunks=["依据片段"],
+        retrieval_meta={"source_count": 0, "max_score": 0.3, "confidence_band": "none",
+                        "semantic_ok": True, "hint": "未找到与该问题相关的依据"},
+    )
+    user = msgs[1]["content"]
+    assert "<retrieval_meta>" in user
+    assert "未找到与该问题相关的依据" in user
+
+
+def test_retrieval_meta_high_confidence_not_injected():
+    """高置信且无降级提示 → 不注入（少扰动 prompt，保 DeepSeek prompt cache）。"""
+    msgs = build_score_prompt(
+        dimension_name="技术方案", max_score=30, rubric="架构合理性",
+        chunks=["依据片段"],
+        retrieval_meta={"source_count": 5, "max_score": 0.8, "confidence_band": "high",
+                        "semantic_ok": True, "hint": None},
+    )
+    user = msgs[1]["content"]
+    assert "<retrieval_meta>" not in user
+
+
+def test_retrieval_meta_high_confidence_with_hint_injected():
+    """高置信但存在降级提示 → 仍注入（hint 优先级独立于置信档位）。"""
+    msgs = build_score_prompt(
+        dimension_name="技术方案", max_score=30, rubric="架构合理性",
+        chunks=["依据片段"],
+        retrieval_meta={"source_count": 3, "max_score": 0.8, "confidence_band": "high",
+                        "semantic_ok": True, "hint": "语义检索暂不可用，以下分析仅基于结构化数据"},
+    )
+    user = msgs[1]["content"]
+    assert "<retrieval_meta>" in user
+
+
+def test_retrieval_meta_absent_not_injected():
+    """不传 retrieval_meta → 无 <retrieval_meta> 段（可选参数向后兼容，benchmark_ai 调用不受影响）。"""
+    msgs = build_score_prompt(
+        dimension_name="技术方案", max_score=30, rubric="架构合理性", chunks=["依据片段"],
+    )
+    user = msgs[1]["content"]
+    assert "<retrieval_meta>" not in user

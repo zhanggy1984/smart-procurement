@@ -196,8 +196,11 @@ async def stream_score(
     # ==================== AI 评分 ====================
     query = f"针对{dim.name}维度，依据评分标准评审该标书"
     yield sse_event("thinking", {"stage": "RETRIEVING"}, seq := seq + 1)
-    results, hint = await retrieve_with_meta(
-        query, lot_id=bid.lot_id, bid_id=bid.bid_id, dimension=dim, top_k=5
+    # return_meta：附带检索质量元信息（source_count/max_score/confidence_band），
+    # 供 tool_call 事件透出 + prompt 置信度声明；默认二元组不受影响
+    results, hint, meta = await retrieve_with_meta(
+        query, lot_id=bid.lot_id, bid_id=bid.bid_id, dimension=dim, top_k=5,
+        return_meta=True,
     )
 
     # 检索结果 → source 事件（证据溯源，旧前端）+ 契约 tool_call（评测端观测检索动作）
@@ -220,6 +223,13 @@ async def stream_score(
         "args": {"query": query[:50]},
         "result": retrievals,
         "status": "success",
+        # 检索质量元信息（对齐 RETRIEVE_RESULT_SCHEMA）：评测端观测检索动作
+        # （命中条数/语义相似度/置信档位/降级状态），加字段不改事件序，契约 §5.1 兼容
+        "source_count": meta["source_count"],
+        "max_score": meta["max_score"],
+        "confidence_band": meta["confidence_band"],
+        "semantic_ok": meta["semantic_ok"],
+        "hint": hint,
     }, seq := seq + 1)
 
     # 无可用依据 → 拒答事件（P2.4 降级提示），不调 LLM
@@ -247,6 +257,8 @@ async def stream_score(
         rubric=rubric,
         chunks=[clean_bid_text(r.content) for r in results if r.source in ("vector", "keyword")],
         structured_data=_clean_structured_data(bid.structured_data),
+        # P7.x 置信度进 prompt：低置信/降级时注入 <retrieval_meta>，LLM 理由中如实指出依据缺口
+        retrieval_meta=meta,
     )
 
     # LLM 流式评分。P7.x：prompt 契约要求先 <thinking> 推理、再 <answer> 结论；切分器

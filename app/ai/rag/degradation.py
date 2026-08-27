@@ -16,6 +16,10 @@ from __future__ import annotations
 SIMILARITY_THRESHOLD = 0.5
 # Milvus 语义检索超时（solution.md：asyncio.wait_for(10s)）
 SEMANTIC_TIMEOUT_SECONDS = 10.0
+# 置信档位阈值（retriever._confidence_band 用，集中管理避免散落）：
+# 低于 LOW（=拒答阈值）判"无关"（none）；[LOW, HIGH) 相关性存疑（low）；>= HIGH 高相关（high）
+CONFIDENCE_LOW_THRESHOLD = SIMILARITY_THRESHOLD
+CONFIDENCE_HIGH_THRESHOLD = 0.65
 
 
 class DegradationHint:

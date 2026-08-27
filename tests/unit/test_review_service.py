@@ -7,8 +7,12 @@ submit_review 人工调整判定（MANUAL_ADJUSTED vs CONFIRMED）。
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
+from app.ai.rag.retriever import RetrievalResult
+from app.services import review_service as svc
 from app.services.review_service import (
     _calc_price_formula,
     _RE_SCORE,
@@ -84,3 +88,65 @@ async def test_create_review_dimension_mismatch():
     session.get.side_effect = [bid, dim]
     with pytest.raises(DimensionMismatchError):
         await create_review(session, expert_id="E1", bid_id="B1", dimension_id="D1")
+
+
+# ==================== P7.x stream_score：tool_call 检索质量元信息（契约标准化） ====================
+
+
+def _find_tool_call(frames: list[str]) -> dict:
+    """从 SSE 帧列表中提取 tool_call 事件的 data JSON。"""
+    for fr in frames:
+        if "\nevent: tool_call\n" in fr:
+            data_line = fr.split("\nevent: tool_call\ndata: ")[1].split("\n\n")[0]
+            return json.loads(data_line)
+    raise AssertionError("未找到 tool_call 事件")
+
+
+@pytest.mark.asyncio
+async def test_stream_score_tool_call_meta(monkeypatch):
+    """评分 stream_score：tool_call 事件透出检索质量元信息（RETRIEVE_RESULT_SCHEMA）。
+
+    覆盖 return_meta=True 链路：source_count/max_score/confidence_band/semantic_ok/hint
+    进 tool_call 事件，评测端可观测检索动作；事件序不变（加字段不破 §5.1）。
+    """
+    session = AsyncMock()
+    review = MagicMock(review_id="R1", expert_id="E1", dimension_id="D1", bid_id="B1")
+    dim = MagicMock(dimension_id="D1", name="技术方案", max_score=30)
+    bid = MagicMock(bid_id="B1", lot_id="LOT-1", bid_amount=None, structured_data=None)
+    session.get.side_effect = [review, dim, bid]
+
+    criterion = MagicMock(name="架构合理性", max_score=10, scoring_rubric="分层清晰", description="")
+    criteria_res = MagicMock()  # .all() 同步返回列表（匹配真实 SQLAlchemy scalars().all() 行为）
+    criteria_res.all.return_value = [criterion]
+    session.scalars.return_value = criteria_res
+
+    result = RetrievalResult(
+        chunk_id="c1", bid_id="B1", lot_id="LOT-1",
+        content="标书技术方案：微服务架构，分层清晰", chapter_title="技术方案", page_no=3,
+        score=0.8, source="vector",
+    )
+    meta = {"source_count": 1, "max_score": 0.8, "semantic_ok": True, "confidence_band": "high"}
+
+    async def _fake_retrieve(query, **kwargs):
+        return [result], None, meta
+
+    monkeypatch.setattr(svc, "retrieve_with_meta", _fake_retrieve)
+
+    async def _fake_stream(prompt, max_tokens=2048):
+        yield "<thinking>依据标书技术方案合理性判断。</thinking>", None
+        yield "<answer>方案完整可行。\n分数: 25.0</answer>", None
+
+    client = MagicMock()
+    client.chat_stream = _fake_stream
+    monkeypatch.setattr(svc, "get_client", lambda: client)
+
+    frames = [f async for f in svc.stream_score(session, review_id="R1", expert_id="E1")]
+    tool = _find_tool_call(frames)
+    assert tool["name"] == "knowledge_retrieval"
+    assert tool["status"] == "success"
+    assert tool["source_count"] == 1
+    assert tool["max_score"] == 0.8
+    assert tool["confidence_band"] == "high"
+    assert tool["semantic_ok"] is True
+    assert tool["hint"] is None
+    assert tool["result"] == [{"chunk_id": "c1", "chapter_title": "技术方案", "score": 0.8}]

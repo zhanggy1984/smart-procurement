@@ -28,6 +28,7 @@ from app.services import conversation_service as conversation
 from app.ai.llm.deepseek_client import get_client
 from app.ai.llm.prompts import ThinkingAnswerSplitter, build_chat_prompt
 from app.ai.llm.text_cleaner import clean_bid_text
+from app.ai.rag.query_cleaner import clean_query
 from app.ai.rag.retriever import retrieve_with_meta
 from app.core.sse import sse_event
 from app.models.bid_document import BidDocument
@@ -249,8 +250,10 @@ async def stream_chat(
             bid = await s.get(BidDocument, review.bid_id)
             chunks: list[str] = []
             if bid is not None:
+                # P7.x query 清洗：用户问题进检索前规则化去噪（客套/emoji/全角词
+                # 稀释向量编码、污染路2 query 词窗）；检索后 chunks 再走 PII 清洗
                 results, _hint = await retrieve_with_meta(
-                    body.question, lot_id=bid.lot_id, bid_id=bid.bid_id,
+                    clean_query(body.question), lot_id=bid.lot_id, bid_id=bid.bid_id,
                     dimension=None, top_k=8,
                 )
                 # P7.x 输入侧清洗：检索结果进 <bid_content> 前规范化 + PII 脱敏

@@ -19,13 +19,33 @@ from dataclasses import dataclass, field
 import structlog
 from sqlalchemy import select
 
-from app.ai.rag.degradation import SEMANTIC_TIMEOUT_SECONDS, classify_retrieval
+from app.ai.rag.degradation import (
+    CONFIDENCE_HIGH_THRESHOLD,
+    CONFIDENCE_LOW_THRESHOLD,
+    SEMANTIC_TIMEOUT_SECONDS,
+    classify_retrieval,
+)
 from app.ai.rag.embedder import get_embedder
 from app.core.database import session_factory
 from app.models.bid_document import BidDocument
 from app.models.project import ScoringCriterion, ScoringDimension
 
 logger = structlog.get_logger(__name__)
+
+# 检索返回结构标准化（P7.x，参考 good-question RETRIEVE_TOOL_SCHEMA 契约风格）。
+# 程序内单一事实源：评分模式 SSE tool_call 事件按此结构透出检索质量元信息，
+# 评测端据此观测检索动作（命中条数/相似度/置信档位/降级状态）。
+RETRIEVE_RESULT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "result": {"type": "array", "description": "命中证据（chunk_id/chapter_title/score）"},
+        "source_count": {"type": "integer", "description": "命中条数（0 表示未命中）"},
+        "max_score": {"type": ["number", "null"], "description": "路1 向量最高 IP（语义相似度）"},
+        "confidence_band": {"type": "string", "enum": ["none", "low", "high"]},
+        "semantic_ok": {"type": "boolean", "description": "路1 语义检索是否可用（超时降级为 false）"},
+        "hint": {"type": ["string", "null"], "description": "降级/拒答提示文案"},
+    },
+}
 
 # 关键词路默认拉取上限（单标书 chunk 数量级，全量打分保证召回）
 _KEYWORD_SCAN_LIMIT = 500
@@ -225,6 +245,18 @@ async def _retrieve_internal(
     return results, max_score, semantic_ok
 
 
+def _confidence_band(max_score: float | None) -> str:
+    """检索置信档三档：none（无分/低于拒答阈值视为无关）｜low（[LOW, HIGH) 相关性存疑）｜high。
+
+    仅反映路1 向量置信度（max_score 为路1 最高 IP），阈值集中定义在 degradation.py。
+    """
+    if max_score is None or max_score < CONFIDENCE_LOW_THRESHOLD:
+        return "none"
+    if max_score < CONFIDENCE_HIGH_THRESHOLD:
+        return "low"
+    return "high"
+
+
 async def retrieve(
     query: str,
     *,
@@ -250,17 +282,30 @@ async def retrieve_with_meta(
     top_k: int = 8,
     k_rrf: int = 60,
     bid_parsed: bool = True,
-) -> tuple[list[RetrievalResult], str | None]:
+    return_meta: bool = False,
+) -> tuple[list[RetrievalResult], str | None] | tuple[list[RetrievalResult], str | None, dict]:
     """带降级判定的检索入口（评审链路/API 用）。返回 (结果, 提示文案)。
 
     提示文案由 degradation.classify_retrieval 判定：语义超时降级 / 标书
     未解析（PARSING）/ 全低分拒答（NO_EVIDENCE）；正常返回 None。
+
+    return_meta=True 时追加返回 meta 字典（max_score/semantic_ok/source_count/
+    confidence_band），供调用方透出 tool_call 事件与进 prompt 的置信度声明
+    （结构见 RETRIEVE_RESULT_SCHEMA）。默认 False 返回二元组，旧调用点零改动。
     """
     results, max_score, semantic_ok = await _retrieve_internal(
         query, lot_id=lot_id, bid_id=bid_id, dimension=dimension, top_k=top_k, k_rrf=k_rrf
     )
     hint = classify_retrieval(max_score, bid_parsed=bid_parsed, semantic_ok=semantic_ok)
-    return results, hint
+    if not return_meta:
+        return results, hint
+    meta = {
+        "max_score": max_score,
+        "semantic_ok": semantic_ok,
+        "source_count": len(results),
+        "confidence_band": _confidence_band(max_score),
+    }
+    return results, hint, meta
 
 
 async def compare_across_bids(

@@ -6,7 +6,15 @@ _score_keywords 词窗命中。
 
 from __future__ import annotations
 
-from app.ai.rag.retriever import _rrf_fuse, _score_keywords
+import pytest
+
+from app.ai.rag.retriever import (
+    RetrievalResult,
+    _confidence_band,
+    _rrf_fuse,
+    _score_keywords,
+    retrieve_with_meta,
+)
 
 
 def test_rrf_fuse_two_routes():
@@ -57,3 +65,73 @@ def test_score_keywords_terms_hit():
     by_id = {cid: s for cid, s in scored}
     assert by_id["c1"] > 0
     assert "c2" not in by_id  # 无命中 → 不出现在稀疏得分列表（等价 0 分）
+
+
+# ==================== P7.x 检索置信档 + return_meta（function calling 契约标准化） ====================
+
+
+def test_confidence_band_boundaries():
+    """置信档三档边界：<0.5 none｜[0.5,0.65) low｜>=0.65 high；None 判无关。"""
+    assert _confidence_band(None) == "none"
+    assert _confidence_band(0.49) == "none"
+    assert _confidence_band(0.5) == "low"
+    assert _confidence_band(0.64) == "low"
+    assert _confidence_band(0.65) == "high"
+    assert _confidence_band(0.9) == "high"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_with_meta_default_two_tuple(monkeypatch):
+    """默认 return_meta=False 返回二元组（旧调用点零改动，accept_p24 依赖）。"""
+    from app.ai.rag import retriever as R
+
+    async def fake_internal(query, **kwargs):
+        return [], 0.9, True
+
+    monkeypatch.setattr(R, "_retrieve_internal", fake_internal)
+    results, hint = await R.retrieve_with_meta("q", lot_id="L", bid_id="B")
+    assert isinstance(results, list)
+    assert hint is None
+
+
+@pytest.mark.asyncio
+async def test_retrieve_with_meta_return_meta(monkeypatch):
+    """return_meta=True 返回三元组，meta 含 source_count/max_score/semantic_ok/confidence_band。"""
+    from app.ai.rag import retriever as R
+
+    result = RetrievalResult(
+        chunk_id="c1", bid_id="B", lot_id="L", content="内容",
+        chapter_title="章", page_no=1, score=0.5, source="vector",
+    )
+
+    async def fake_internal(query, **kwargs):
+        return [result], 0.55, True
+
+    monkeypatch.setattr(R, "_retrieve_internal", fake_internal)
+    results, hint, meta = await R.retrieve_with_meta(
+        "q", lot_id="L", bid_id="B", return_meta=True
+    )
+    assert len(results) == 1
+    assert hint is None
+    assert meta["source_count"] == 1
+    assert meta["max_score"] == 0.55
+    assert meta["semantic_ok"] is True
+    assert meta["confidence_band"] == "low"  # 0.55 ∈ [0.5, 0.65)
+
+
+@pytest.mark.asyncio
+async def test_retrieve_with_meta_return_meta_low_score(monkeypatch):
+    """低分（低于拒答阈值）→ hint=NO_EVIDENCE、confidence=none（评分 prompt 触发低置信段）。"""
+    from app.ai.rag import retriever as R
+    from app.ai.rag.degradation import DegradationHint
+
+    async def fake_internal(query, **kwargs):
+        return [], 0.3, True
+
+    monkeypatch.setattr(R, "_retrieve_internal", fake_internal)
+    results, hint, meta = await R.retrieve_with_meta(
+        "q", lot_id="L", bid_id="B", return_meta=True
+    )
+    assert hint == DegradationHint.NO_EVIDENCE
+    assert meta["source_count"] == 0
+    assert meta["confidence_band"] == "none"
