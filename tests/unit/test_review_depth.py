@@ -35,7 +35,26 @@ from app.services.review_service import (
 
 @pytest.mark.asyncio
 async def test_create_review_success():
-    """bid=FROZEN + 维度归属匹配 → 创建 DRAFT 评审工作台。"""
+    """bid=FROZEN + 维度归属匹配 + 专家已分配 → 创建 DRAFT 评审工作台。"""
+    session = AsyncMock()
+    bid = MagicMock()
+    bid.status = BidStatus.FROZEN
+    bid.lot_id = "LOT-A"
+    dim = MagicMock()
+    dim.lot_id = "LOT-A"
+    assignment = MagicMock()
+    assignment.dimension_ids = ["D-1"]
+    session.get.side_effect = [bid, dim]
+    session.scalar.return_value = assignment
+    review = await create_review(session, expert_id="EXP-1", bid_id="BID-1", dimension_id="D-1")
+    assert review.status == "DRAFT"
+    session.add.assert_called_once()
+    session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_create_review_expert_not_assigned_403():
+    """专家未被分配标段 → 越权拒绝（评审水平越权防护）。"""
     session = AsyncMock()
     bid = MagicMock()
     bid.status = BidStatus.FROZEN
@@ -43,10 +62,26 @@ async def test_create_review_success():
     dim = MagicMock()
     dim.lot_id = "LOT-A"
     session.get.side_effect = [bid, dim]
-    review = await create_review(session, expert_id="EXP-1", bid_id="BID-1", dimension_id="D-1")
-    assert review.status == "DRAFT"
-    session.add.assert_called_once()
-    session.commit.assert_awaited_once()
+    session.scalar.return_value = None
+    with pytest.raises(ReviewAccessDeniedError):
+        await create_review(session, expert_id="EXP-9", bid_id="BID-1", dimension_id="D-1")
+
+
+@pytest.mark.asyncio
+async def test_create_review_dimension_not_in_assignment_403():
+    """专家已分配标段但维度不在负责维度 → 越权拒绝。"""
+    session = AsyncMock()
+    bid = MagicMock()
+    bid.status = BidStatus.FROZEN
+    bid.lot_id = "LOT-A"
+    dim = MagicMock()
+    dim.lot_id = "LOT-A"
+    assignment = MagicMock()
+    assignment.dimension_ids = ["D-OTHER"]
+    session.get.side_effect = [bid, dim]
+    session.scalar.return_value = assignment
+    with pytest.raises(ReviewAccessDeniedError):
+        await create_review(session, expert_id="EXP-1", bid_id="BID-1", dimension_id="D-1")
 
 
 @pytest.mark.asyncio

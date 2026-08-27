@@ -61,18 +61,53 @@ def _parse_sse(lines: list[str]) -> list[dict]:
     return events
 
 
+async def _assign_lot_expert(lot_id: str, expert_id: str, dim_ids: list[str]) -> None:
+    """前置专家-标段分配（评审归属校验必需，P4.2 分配数据直接 ORM 落库）。"""
+    from app.core.database import session_factory
+    from app.models.lot_expert_assignment import LotExpertAssignment
+
+    async with session_factory() as s:
+        s.add(LotExpertAssignment(lot_id=lot_id, expert_id=expert_id, dimension_ids=dim_ids))
+        await s.commit()
+
+
 # ==================== 创建评审工作台 ====================
 
 
 @pytest.mark.asyncio
 async def test_create_review_success(client, pm_headers, exp_headers, lot_factory, bid_factory, set_bid_parsed):
-    """bid FROZEN + 维度归属匹配 → 201 DRAFT。"""
+    """bid FROZEN + 维度归属匹配 + 专家已分配 → 201 DRAFT。"""
     lot, bids = await _frozen_lot(client, pm_headers, lot_factory, bid_factory, set_bid_parsed)
     price_dim = await _dim_id(client, pm_headers, lot["lot_id"], "报价")
+    await _assign_lot_expert(lot["lot_id"], "ITEST-E1", [price_dim])
     resp = await client.post("/api/v1/reviews", headers=exp_headers,
                              json={"bid_id": bids[0], "dimension_id": price_dim})
     assert resp.status_code == 201
     assert resp.json()["status"] == "DRAFT"
+
+
+@pytest.mark.asyncio
+async def test_create_review_expert_not_assigned_403(client, pm_headers, exp_headers, lot_factory, bid_factory, set_bid_parsed):
+    """专家未被分配标段 → 403（评审水平越权防护）。"""
+    lot, bids = await _frozen_lot(client, pm_headers, lot_factory, bid_factory, set_bid_parsed)
+    price_dim = await _dim_id(client, pm_headers, lot["lot_id"], "报价")
+    # 不建 assignment，直接越权创建
+    resp = await client.post("/api/v1/reviews", headers=exp_headers,
+                             json={"bid_id": bids[0], "dimension_id": price_dim})
+    assert resp.status_code == 403
+    assert "未被分配" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_create_review_dimension_not_in_assignment_403(client, pm_headers, exp_headers, lot_factory, bid_factory, set_bid_parsed):
+    """专家已分配标段但维度不在负责维度 → 403。"""
+    lot, bids = await _frozen_lot(client, pm_headers, lot_factory, bid_factory, set_bid_parsed)
+    price_dim = await _dim_id(client, pm_headers, lot["lot_id"], "报价")
+    await _assign_lot_expert(lot["lot_id"], "ITEST-E1", ["ITEST-D-OTHER"])
+    resp = await client.post("/api/v1/reviews", headers=exp_headers,
+                             json={"bid_id": bids[0], "dimension_id": price_dim})
+    assert resp.status_code == 403
+    assert "不在专家" in resp.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -106,6 +141,7 @@ async def test_stream_score_price_formula(client, pm_headers, exp_headers, lot_f
     lot, bids = await _frozen_lot(client, pm_headers, lot_factory, bid_factory, set_bid_parsed,
                                   amounts=[100, 120, 80])
     price_dim = await _dim_id(client, pm_headers, lot["lot_id"], "报价")
+    await _assign_lot_expert(lot["lot_id"], "ITEST-E1", [price_dim])
     r = await client.post("/api/v1/reviews", headers=exp_headers,
                           json={"bid_id": bids[0], "dimension_id": price_dim})
     review_id = r.json()["review_id"]
@@ -131,6 +167,7 @@ async def test_stream_score_idempotency_422(client, pm_headers, exp_headers, lot
     lot, bids = await _frozen_lot(client, pm_headers, lot_factory, bid_factory, set_bid_parsed,
                                   amounts=[100, 120, 80])
     price_dim = await _dim_id(client, pm_headers, lot["lot_id"], "报价")
+    await _assign_lot_expert(lot["lot_id"], "ITEST-E1", [price_dim])
     r = await client.post("/api/v1/reviews", headers=exp_headers,
                           json={"bid_id": bids[0], "dimension_id": price_dim})
     review_id = r.json()["review_id"]
@@ -153,6 +190,7 @@ async def test_stream_score_circuit_open_503(client, pm_headers, exp_headers, lo
     lot, bids = await _frozen_lot(client, pm_headers, lot_factory, bid_factory, set_bid_parsed,
                                   amounts=[100, 120, 80])
     price_dim = await _dim_id(client, pm_headers, lot["lot_id"], "报价")
+    await _assign_lot_expert(lot["lot_id"], "ITEST-E1", [price_dim])
     r = await client.post("/api/v1/reviews", headers=exp_headers,
                           json={"bid_id": bids[0], "dimension_id": price_dim})
     review_id = r.json()["review_id"]
@@ -173,6 +211,7 @@ async def test_save_and_submit_review(client, pm_headers, exp_headers, lot_facto
     lot, bids = await _frozen_lot(client, pm_headers, lot_factory, bid_factory, set_bid_parsed,
                                   amounts=[100, 120, 80])
     price_dim = await _dim_id(client, pm_headers, lot["lot_id"], "报价")
+    await _assign_lot_expert(lot["lot_id"], "ITEST-E1", [price_dim])
     r = await client.post("/api/v1/reviews", headers=exp_headers,
                           json={"bid_id": bids[0], "dimension_id": price_dim})
     review_id = r.json()["review_id"]
@@ -194,6 +233,7 @@ async def test_stream_chat_with_fake_llm(client, pm_headers, exp_headers, lot_fa
     lot, bids = await _frozen_lot(client, pm_headers, lot_factory, bid_factory, set_bid_parsed,
                                   amounts=[100, 120, 80])
     tech_dim = await _dim_id(client, pm_headers, lot["lot_id"], "技术")
+    await _assign_lot_expert(lot["lot_id"], "ITEST-E1", [tech_dim])
     r = await client.post("/api/v1/reviews", headers=exp_headers,
                           json={"bid_id": bids[0], "dimension_id": tech_dim})
     review_id = r.json()["review_id"]
@@ -253,6 +293,7 @@ async def test_score_stream_error_frame_on_service_failure(client, pm_headers, e
     lot, bids = await _frozen_lot(client, pm_headers, lot_factory, bid_factory, set_bid_parsed,
                                   amounts=[100, 120, 80])
     price_dim = await _dim_id(client, pm_headers, lot["lot_id"], "报价")
+    await _assign_lot_expert(lot["lot_id"], "ITEST-E1", [price_dim])
     r = await client.post("/api/v1/reviews", headers=exp_headers,
                           json={"bid_id": bids[0], "dimension_id": price_dim})
     review_id = r.json()["review_id"]
@@ -329,6 +370,7 @@ async def test_score_cache_second_call_replays_without_llm(
     lot, bids = await _frozen_lot(client, pm_headers, lot_factory, bid_factory, set_bid_parsed,
                                   amounts=[100, 120, 80])
     tech_dim = await _dim_id(client, pm_headers, lot["lot_id"], "技术")
+    await _assign_lot_expert(lot["lot_id"], "ITEST-E1", [tech_dim])
     r1 = await client.post("/api/v1/reviews", headers=exp_headers,
                            json={"bid_id": bids[0], "dimension_id": tech_dim})
     r2 = await client.post("/api/v1/reviews", headers=exp_headers,

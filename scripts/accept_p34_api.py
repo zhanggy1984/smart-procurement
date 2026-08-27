@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import os
 import sys
 import time
@@ -87,6 +88,10 @@ async def cleanup(engine, bid_id: str | None = None) -> None:
             if rev_ids:
                 await conn.execute(text("DELETE FROM conversation_message WHERE review_id IN :ids"), {"ids": rev_ids})
             await conn.execute(text("DELETE FROM expert_review WHERE bid_id=:b"), {"b": bid_id})
+        await conn.execute(
+            text("DELETE FROM lot_expert_assignment WHERE lot_id=:lot AND expert_id='EXP-001'"),
+            {"lot": LOT_ID},
+        )
         await conn.execute(text("DELETE FROM bid_document WHERE lot_id=:lot AND file_url LIKE 'bids/%'"), {"lot": LOT_ID})
     remove_prefix(get_minio_client(), f"bids/{LOT_ID}/")
 
@@ -123,6 +128,16 @@ async def main() -> None:
         ), {"lot": LOT_ID})).all()
     check("获取 ≥2 个维度", len(dims) >= 2, f"dims={len(dims)}")
     d1, d2 = dims[0], dims[1]
+
+    # 评审归属校验前置（P4.2 分配）：EXP-001 分配 d1/d2 维度，否则 create_review 403
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO lot_expert_assignment (lot_id, expert_id, dimension_ids, status) "
+                 "VALUES (:lot, :exp, :dims, 'PENDING_DECLARATION')"),
+            {"lot": LOT_ID, "exp": "EXP-001",
+             "dims": json.dumps([d1.dimension_id, d2.dimension_id])},
+        )
+    print("  [setup] 专家-标段分配已前置（评审归属校验）")
 
     expert = await login("expert_01")
     headers = {"Authorization": f"Bearer {expert}"}

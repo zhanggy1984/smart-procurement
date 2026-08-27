@@ -177,7 +177,8 @@ async def create_review(
         review = await svc.create_review(
             session, expert_id=expert_id, bid_id=body.bid_id, dimension_id=body.dimension_id
         )
-    except (svc.ReviewNotFoundError, svc.BidNotFrozenError, svc.DimensionMismatchError) as e:
+    except (svc.ReviewNotFoundError, svc.BidNotFrozenError, svc.DimensionMismatchError,
+            svc.ReviewAccessDeniedError) as e:
         raise _service_to_http(e)
     return ReviewOut.model_validate(review)
 

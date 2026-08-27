@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import os
 import sys
 import time
@@ -114,6 +115,14 @@ async def main() -> None:
         dim = (await conn.execute(text(
             "SELECT dimension_id FROM scoring_dimension WHERE lot_id=:l AND name='技术方案'"), {"l": LOT_ID}
         )).scalar_one()
+    # 评审归属校验前置（P4.2 分配）：EXP-001 分配技术方案维度，否则 create_review 403
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO lot_expert_assignment (lot_id, expert_id, dimension_ids, status) "
+                 "VALUES (:lot, :exp, :dims, 'PENDING_DECLARATION')"),
+            {"lot": LOT_ID, "exp": "EXP-001", "dims": json.dumps([dim])},
+        )
+    print("  [setup] 专家-标段分配已前置（评审归属校验）")
     expert = await login("expert_01")
     eheaders = {"Authorization": f"Bearer {expert}"}
     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -189,6 +198,10 @@ async def main() -> None:
         if rev_ids:
             await conn.execute(text("DELETE FROM conversation_message WHERE review_id IN :ids"), {"ids": rev_ids})
         await conn.execute(text("DELETE FROM expert_review WHERE bid_id=:b"), {"b": bid_id})
+        await conn.execute(
+            text("DELETE FROM lot_expert_assignment WHERE lot_id=:lot AND expert_id='EXP-001'"),
+            {"lot": LOT_ID},
+        )
         await conn.execute(text("DELETE FROM bid_document WHERE bid_id=:b"), {"b": bid_id})
     remove_prefix(get_minio_client(), f"bids/{LOT_ID}/")
     print("\n[cleanup] 状态已还原，验收数据已清理")

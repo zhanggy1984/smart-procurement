@@ -141,6 +141,10 @@ async def cleanup(engine, bid_id: str | None = None) -> None:
                 )
             await conn.execute(text("DELETE FROM expert_review WHERE bid_id=:b"), {"b": bid_id})
         await conn.execute(
+            text("DELETE FROM lot_expert_assignment WHERE lot_id=:lot AND expert_id='EXP-001'"),
+            {"lot": LOT_ID},
+        )
+        await conn.execute(
             text("DELETE FROM bid_document WHERE lot_id=:lot AND file_url LIKE 'bids/%'"),
             {"lot": LOT_ID},
         )
@@ -174,6 +178,16 @@ async def main() -> None:
     if not (tech_dim and price_dim):
         await cleanup(engine)
         sys.exit(1)
+
+    # 评审归属校验前置（P4.2 分配）：EXP-001 分配技术方案+报价维度，否则 create_review 403
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO lot_expert_assignment (lot_id, expert_id, dimension_ids, status) "
+                 "VALUES (:lot, :exp, :dims, 'PENDING_DECLARATION')"),
+            {"lot": LOT_ID, "exp": "EXP-001",
+             "dims": json.dumps([tech_dim.dimension_id, price_dim.dimension_id])},
+        )
+    print("  [setup] 专家-标段分配已前置（评审归属校验）")
 
     expert_token = await login("expert_01")
     headers = {"Authorization": f"Bearer {expert_token}"}

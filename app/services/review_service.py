@@ -31,6 +31,7 @@ from app.core.sse import sse_event
 from app.models.bid_document import BidDocument, BidStatus
 from app.models.expert import Expert
 from app.models.expert_review import ExpertReview, ReviewStatus
+from app.models.lot_expert_assignment import LotExpertAssignment
 from app.models.project import Lot, ScoringCriterion, ScoringDimension
 from app.models.supplier import Supplier
 
@@ -172,7 +173,7 @@ async def create_review(
     bid_id: str,
     dimension_id: str,
 ) -> ExpertReview:
-    """创建评审工作台。校验 bid=FROZEN + 维度归属标段（task.md P3.3）。"""
+    """创建评审工作台。校验 bid=FROZEN + 维度归属标段 + 专家分配归属（task.md P3.3）。"""
     bid = await session.get(BidDocument, bid_id)
     if bid is None:
         raise ReviewNotFoundError(f"标书不存在: {bid_id}")
@@ -183,6 +184,17 @@ async def create_review(
         raise DimensionMismatchError(f"评分维度不存在: {dimension_id}")
     if dim.lot_id != bid.lot_id:
         raise DimensionMismatchError(f"维度 {dimension_id} 不属于标段 {bid.lot_id}")
+    # 评审越权防护：专家须为标段被分配评审员，且维度在其负责维度内
+    assignment = await session.scalar(
+        select(LotExpertAssignment).where(
+            LotExpertAssignment.expert_id == expert_id,
+            LotExpertAssignment.lot_id == bid.lot_id,
+        )
+    )
+    if assignment is None:
+        raise ReviewAccessDeniedError(f"专家 {expert_id} 未被分配标段 {bid.lot_id} 评审")
+    if assignment.dimension_ids and dimension_id not in assignment.dimension_ids:
+        raise ReviewAccessDeniedError(f"维度 {dimension_id} 不在专家 {expert_id} 的分配维度内")
 
     now = _now()
     review = ExpertReview(
