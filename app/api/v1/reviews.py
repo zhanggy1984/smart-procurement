@@ -27,6 +27,7 @@ from app.services import review_service as svc
 from app.services import conversation_service as conversation
 from app.ai.llm.deepseek_client import get_client
 from app.ai.llm.prompts import ThinkingAnswerSplitter, build_chat_prompt
+from app.ai.llm.text_cleaner import clean_bid_text
 from app.ai.rag.retriever import retrieve_with_meta
 from app.core.sse import sse_event
 from app.models.bid_document import BidDocument
@@ -252,7 +253,9 @@ async def stream_chat(
                     body.question, lot_id=bid.lot_id, bid_id=bid.bid_id,
                     dimension=None, top_k=8,
                 )
-                chunks = [r.content for r in results if r.source in ("vector", "keyword")]
+                # P7.x 输入侧清洗：检索结果进 <bid_content> 前规范化 + PII 脱敏
+                # （真实标书正文身份证/手机/邮箱明文进 prompt，LLM 会复述泄漏）
+                chunks = [clean_bid_text(r.content) for r in results if r.source in ("vector", "keyword")]
             await conversation.add_message(
                 s, review_id=review_id, dimension_id=review.dimension_id,
                 role="user", content=body.question,

@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.llm.deepseek_client import CircuitOpenError, get_client
 from app.ai.llm.prompts import ThinkingAnswerSplitter, build_score_prompt
+from app.ai.llm.text_cleaner import clean_bid_text, redact_pii
 from app.ai.rag.retriever import retrieve_with_meta
 from app.core.config import settings
 from app.core.crypto import generate_id
@@ -35,6 +36,16 @@ logger = structlog.get_logger(__name__)
 
 # 报价维度名（solution.md：报价评审从 AI 剥离，纯公式）
 PRICE_DIMENSION_NAME = "报价"
+
+
+def _clean_structured_data(data: dict | None) -> dict | None:
+    """结构化数据值过 PII 脱敏（防御未来抽取字段扩展含联系方式）。
+
+    quality_cert/warranty_months 当前为短字符串无 PII，此层是防御性兜底。
+    """
+    if not data:
+        return data
+    return {k: redact_pii(v) if isinstance(v, str) else v for k, v in data.items()}
 # 评分输出解析：prompt 要求最后一行 `分数: X`
 _RE_SCORE = __import__("re").compile(r"分数\s*[:：]\s*(\d+(?:\.\d+)?)")
 # 兜底：LLM 未按 `分数: X` 输出时，抓 "X分 / Y分" 里的 X（如 "19.0分 / 30.0分"）
@@ -228,12 +239,14 @@ async def stream_score(
         for c in criteria
     ]
     rubric = "\n".join(rubric_lines) if rubric_lines else f"{dim.name} 满分 {dim.max_score} 分"
+    # P7.x 输入侧清洗：检索结果进 <bid_content> 前规范化 + PII 脱敏（真实标书
+    # 身份证/手机/邮箱明文进 prompt，LLM 会复述泄漏）；structured_data 值兜底脱敏
     prompt = build_score_prompt(
         dimension_name=dim.name,
         max_score=float(dim.max_score or 0),
         rubric=rubric,
-        chunks=[r.content for r in results if r.source in ("vector", "keyword")],
-        structured_data=bid.structured_data,
+        chunks=[clean_bid_text(r.content) for r in results if r.source in ("vector", "keyword")],
+        structured_data=_clean_structured_data(bid.structured_data),
     )
 
     # LLM 流式评分。P7.x：prompt 契约要求先 <thinking> 推理、再 <answer> 结论；切分器
