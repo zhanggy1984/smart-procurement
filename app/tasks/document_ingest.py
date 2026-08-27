@@ -324,6 +324,8 @@ async def document_ingest(ctx: dict, bid_id: str) -> str:
     返回终态：'PARSED' 或 'PARSE_FAILED'。
     """
     from app.core.config import settings
+    # ST1 评分缓存失效（懒导入：task → service 引用会拖入 deepseek_client，避免任务侧引入）
+    from app.services.review_service import flush_score_cache
 
     max_retries = settings.doc_parse_max_retries
     retry_delay = settings.doc_parse_retry_delay_seconds
@@ -331,6 +333,8 @@ async def document_ingest(ctx: dict, bid_id: str) -> str:
         try:
             await _run_pipeline(bid_id)
             logger.info("bid.parse_done", bid_id=bid_id, attempts=attempt + 1)
+            # 解析成功 = 标书内容/chunks 更新，同 bid 评分缓存依据过期（ST1）
+            await flush_score_cache(bid_id)
             return "PARSED"
         except NonRetryableParseError as e:
             # 确定性错误：立即失败，不走重试

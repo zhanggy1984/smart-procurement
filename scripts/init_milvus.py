@@ -60,7 +60,9 @@ def init_milvus(force: bool = False) -> None:
     )
     collection_name = settings.milvus_collection
 
-    if force and utility.has_collection(collection_name):
+    rebuilt = force and utility.has_collection(collection_name)
+
+    if rebuilt:
         collection = Collection(collection_name)
         collection.drop()
         print(f"Collection '{collection_name}' 已 drop（--force 重建）")
@@ -92,6 +94,19 @@ def init_milvus(force: bool = False) -> None:
 
     collection.load()
     print("Collection 已 load() 预热")
+
+    if rebuilt:
+        # ST1 评分缓存失效：--force 重建后 chunks 变化，旧缓存评分依据过期 → 全量失效。
+        # 放重建+load 之后执行：即便 flush 失败（如导入/Redis 异常），collection 也已处于
+        # 可用状态，缓存仅靠 TTL 24h 兜底，不影响本脚本主流程。
+        try:
+            import asyncio
+            from app.services.review_service import flush_score_cache
+
+            asyncio.run(flush_score_cache())
+            print("评分语义缓存已全量失效")
+        except Exception as e:  # noqa: BLE001
+            print(f"评分缓存失效失败（TTL 24h 兜底）: {e}")
 
     collections = utility.list_collections()
     print(f"当前 collections: {collections}")

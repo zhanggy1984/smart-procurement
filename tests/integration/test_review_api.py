@@ -268,3 +268,123 @@ async def test_score_stream_error_frame_on_service_failure(client, pm_headers, e
     events = _parse_sse(lines)
     assert events[-1]["event"] == "error"
     assert events[-1]["data"]["detail"] == "评分流中断，请重试"
+
+
+# ==================== ST1 评分语义缓存（同 bid×dim 二次调用重放） ====================
+
+
+class _FakeRedis:
+    """内存 Redis 替身（仅服务层评分缓存用，不污染共享 Redis）。
+
+    写路径自原子化改造后走 r.pipeline(transaction=True)（MULTI/EXEC：delete/rpush/expire
+    缓冲，execute 统一生效），读路径仍 lrange。"""
+    def __init__(self) -> None:
+        self._store: dict[str, list[str]] = {}
+
+    async def lrange(self, key, start=0, end=-1):
+        vals = self._store.get(key, [])
+        return vals if (start, end) == (0, -1) else vals[start:end or None]
+
+    def pipeline(self, transaction=True):
+        return _FakePipeline(self._store)
+
+
+class _FakePipeline:
+    """MULTI/EXEC 替身：缓冲 delete/rpush/expire，execute 时按序应用到共享 store。"""
+
+    def __init__(self, store: dict[str, list[str]]) -> None:
+        self._store = store
+        self._cmds: list[tuple] = []
+
+    def delete(self, key):
+        self._cmds.append(("del", key))
+
+    def rpush(self, key, *values):
+        self._cmds.append(("rpush", key, values))
+
+    def expire(self, key, ttl):
+        self._cmds.append(("expire", key, ttl))
+
+    async def execute(self):
+        for cmd in self._cmds:
+            if cmd[0] == "del":
+                self._store.pop(cmd[1], None)
+            elif cmd[0] == "rpush":
+                self._store.setdefault(cmd[1], []).extend(cmd[2])
+            # expire：TTL 是替身不模拟的观测语义，无存储状态
+        return [True] * len(self._cmds)
+
+
+@pytest.mark.asyncio
+async def test_score_cache_second_call_replays_without_llm(
+    client, pm_headers, exp_headers, lot_factory, bid_factory, set_bid_parsed
+):
+    """ST1：同 bid×dim 两次 POST /score（两个 review_id）→ 首次调 LLM、第二次重放首次结果。
+
+    验证：事件序一致、done.score 一致、usage 透传首次值、LLM 仅首次被调。
+    mock retrieve_with_meta（集成测试无 Milvus 索引，隔离缓存行为本身）。
+    """
+    from app.ai.rag.retriever import RetrievalResult
+
+    lot, bids = await _frozen_lot(client, pm_headers, lot_factory, bid_factory, set_bid_parsed,
+                                  amounts=[100, 120, 80])
+    tech_dim = await _dim_id(client, pm_headers, lot["lot_id"], "技术")
+    r1 = await client.post("/api/v1/reviews", headers=exp_headers,
+                           json={"bid_id": bids[0], "dimension_id": tech_dim})
+    r2 = await client.post("/api/v1/reviews", headers=exp_headers,
+                           json={"bid_id": bids[0], "dimension_id": tech_dim})
+    assert r1.status_code == 201 and r2.status_code == 201
+    review1, review2 = r1.json()["review_id"], r2.json()["review_id"]
+    assert review1 != review2  # 两个 review 实例，同一 bid×dim
+
+    result = RetrievalResult(
+        chunk_id="ITEST-CHUNK-1", bid_id=bids[0], lot_id=lot["lot_id"],
+        content="标书技术方案：微服务架构，分层清晰", chapter_title="技术方案",
+        page_range=[3, 3], score=0.8, source="vector",
+    )
+    meta = {"source_count": 1, "max_score": 0.8, "semantic_ok": True, "confidence_band": "high"}
+
+    async def _fake_retrieve(query, **kwargs):
+        return [result], None, meta
+
+    calls: list = []
+    fake = MagicMock()
+    fake.circuit_state = "CLOSED"
+
+    async def _stream(prompt, max_tokens=2048):
+        calls.append(prompt)
+        yield "<thinking>依据技术方案合理性判断。</thinking>", {
+            "prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150,
+            "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 100,
+        }
+        yield "<answer>方案完整可行。\n分数: 25.0</answer>", None
+
+    fake.chat_stream = _stream
+    fake_redis = _FakeRedis()
+    # get_client：reviews 层 circuit 检查 + service 层 chat_stream 都需替换
+    with patch("app.api.v1.reviews.get_client", return_value=fake), \
+            patch("app.services.review_service.get_client", return_value=fake), \
+            patch("app.services.review_service.get_redis", return_value=fake_redis), \
+            patch("app.services.review_service.retrieve_with_meta", new=_fake_retrieve):
+        async with client.stream("POST", f"/api/v1/reviews/{review1}/score",
+                                 headers=exp_headers) as sr:
+            assert sr.status_code == 200
+            ev1 = _parse_sse([ln async for ln in sr.aiter_lines()])
+        async with client.stream("POST", f"/api/v1/reviews/{review2}/score",
+                                 headers=exp_headers) as sr:
+            assert sr.status_code == 200
+            ev2 = _parse_sse([ln async for ln in sr.aiter_lines()])
+
+    assert len(calls) == 1  # 仅首次真实调 LLM，第二次缓存重放
+    names1 = [e["event"] for e in ev1]
+    names2 = [e["event"] for e in ev2]
+    assert names1 == names2  # 事件序零偏差（契约 §5.1）
+    # 命中返回首次结果：done.score / usage 一致（usage 透传首次真实值，不发 0）
+    d1 = next(e for e in ev1 if e["event"] == "done")["data"]
+    d2 = next(e for e in ev2 if e["event"] == "done")["data"]
+    assert d1["score"] == d2["score"] == 25.0
+    u1 = next(e for e in ev1 if e["event"] == "usage")["data"]
+    u2 = next(e for e in ev2 if e["event"] == "usage")["data"]
+    assert u1["total_tokens"] == u2["total_tokens"] == 150
+    # 重放段（meta 之后全部帧）事件序一致（meta 每次重生成带新 ts，不比值）
+    assert names2[1:] == names1[1:]

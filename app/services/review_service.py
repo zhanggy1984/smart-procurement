@@ -26,6 +26,7 @@ from app.ai.rag.degradation import DegradationHint
 from app.ai.rag.retriever import retrieve_with_meta
 from app.core.config import settings
 from app.core.crypto import generate_id
+from app.core.redis import flush_keys, get_redis, redis_warn_once
 from app.core.sse import sse_event
 from app.models.bid_document import BidDocument, BidStatus
 from app.models.expert import Expert
@@ -70,6 +71,70 @@ def _extract_score(full_text: str, max_score: float) -> tuple[float | None, str 
     if v < 0 or v > max_score:
         return None, DegradationHint.SCORE_OUT_OF_RANGE
     return v, None
+
+
+# ==================== ST1 评分语义缓存（同标段同维度评分结果缓存） ====================
+#
+# solution.md P2 技术债 ST1：同 bid×dim 的评分流重复触发（前端刷新重评/评测脚本
+# 连跑）不再重复打 LLM，重放首次产出的 SSE 帧（命中返回首次结果，用户已拍板）。
+# 缓存内容 = 已生成 SSE 帧列表（不含 meta 首帧），零重建逻辑、事件序零偏差、
+# usage 透传首次真实值（评测断言 usage 字段齐全且为正）。Redis 挂 → fail-open：
+# 读失败=miss 走真实流，写失败忽略，评分主链路不受阻。
+
+# 缓存 key：score:scache:{bid_id}:{dimension_id}:{model}（同标段同维度同模型，跨 review 复用）。
+# model 进 key：meta 帧每次重放重新生成（带当前 settings.deepseek_model），若 body 帧是旧模型
+# 产物而 meta 报新模型，客户端会看到自相矛盾的流 → model 变更自然 miss 重新评分。
+_SCORE_CACHE_PREFIX = "score:scache:"
+_SCORE_CACHE_TTL_SECONDS = 86400  # 24h，一次评审会议窗口
+
+
+def _score_cache_key(bid_id: str, dimension_id: str) -> str:
+    return f"{_SCORE_CACHE_PREFIX}{bid_id}:{dimension_id}:{settings.deepseek_model}"
+
+
+async def _load_score_frames(cache_key: str) -> list[str] | None:
+    """读评分缓存帧列表。未命中/Redis 挂 → None（miss 走真实流）。"""
+    try:
+        frames = await get_redis().lrange(cache_key, 0, -1)
+        return list(frames) if frames else None
+    except Exception as e:  # noqa: BLE001  Redis 不可用 → miss，不阻断评分
+        await redis_warn_once("review.score_cache_read_down", str(e))
+        return None
+
+
+async def _save_score_frames(cache_key: str, frames: list[str]) -> None:
+    """写评分缓存帧列表（TTL 24h）。Redis 挂忽略（fail-open，仅限频告警）。
+
+    MULTI/EXEC 原子写：delete+rpush+expire 一次提交。若分三步非原子，两个并发
+    miss（同 bid×dim，各自真实调 LLM）会交错 append 两批帧污染缓存列表 → 重放
+    畸形流（重复 done/重复 seq），破"事件序零偏差"契约。
+    """
+    if not frames:
+        return
+    try:
+        r = get_redis()
+        pipe = r.pipeline(transaction=True)
+        pipe.delete(cache_key)  # 先删后推，保证幂等（同 key 重评刷新）
+        pipe.rpush(cache_key, *frames)
+        pipe.expire(cache_key, _SCORE_CACHE_TTL_SECONDS)
+        await pipe.execute()
+        logger.info("review.score_cache_set", key=cache_key, frames=len(frames))
+    except Exception as e:  # noqa: BLE001
+        await redis_warn_once("review.score_cache_set_down", str(e))
+
+
+async def flush_score_cache(bid_id: str | None = None) -> int:
+    """失效评分缓存：指定标书按 bid 前缀删；None 全量删（Milvus 重建/llm.* 配置变更）。
+
+    Redis 挂 → 告警并返回 0（缓存失效失败可见，TTL 24h 兜底兜底）。调用方无需 try/except。
+    """
+    try:
+        if bid_id is not None:
+            return await flush_keys(f"{_SCORE_CACHE_PREFIX}{bid_id}:")
+        return await flush_keys(_SCORE_CACHE_PREFIX)
+    except Exception as e:  # noqa: BLE001
+        await redis_warn_once("review.score_cache_flush_down", str(e))
+        return 0
 
 
 class LotNotFoundError(ValueError):
@@ -215,7 +280,29 @@ async def stream_score(
 
     # ==================== AI 评分 ====================
     query = f"针对{dim.name}维度，依据评分标准评审该标书"
-    yield sse_event("thinking", {"stage": "RETRIEVING"}, seq := seq + 1)
+    # ST1 评分语义缓存：同标段同维度结果重放（命中 → 不重复打 LLM）。meta 帧
+    # 已正常发出，缓存帧 seq 从 2 起衔接自洽；重放返回"首次结果"（用户已拍板），
+    # usage 透传首次真实值（评测断言 usage 齐全且为正，不能发 0）。
+    cache_key = _score_cache_key(bid.bid_id, dim.dimension_id)
+    cached = await _load_score_frames(cache_key)
+    if cached is not None:
+        logger.info("review.cache_hit", bid_id=bid.bid_id, dimension_id=dim.dimension_id,
+                    frames=len(cached))
+        for fr in cached:
+            yield fr
+        return
+    # 帧收集：AI 分支产出的帧全部进 frames，正常走完 → 写缓存；NO_EVIDENCE /
+    # CircuitOpenError / 客户端中断（generator 未走完）提前 return，frames 不落缓存。
+    frames: list[str] = []
+
+    def emit(event: str, data: dict) -> str:
+        """生成 SSE 帧（seq 衔接不变）并收集进评分缓存帧列表。"""
+        nonlocal seq
+        frame = sse_event(event, data, seq := seq + 1)
+        frames.append(frame)
+        return frame
+
+    yield emit("thinking", {"stage": "RETRIEVING"})
     # return_meta：附带检索质量元信息（source_count/max_score/confidence_band），
     # 供 tool_call 事件透出 + prompt 置信度声明；默认二元组不受影响
     results, hint, meta = await retrieve_with_meta(
@@ -232,14 +319,13 @@ async def stream_score(
                 "chunk_id": r.chunk_id, "chapter_title": r.chapter_title,
                 "page_range": r.page_range, "score": round(r.score, 4),
             })
-            yield sse_event(
+            yield emit(
                 "source",
                 {"chunk_id": r.chunk_id, "content": r.content[:500],
                  "chapter_title": r.chapter_title, "page_range": r.page_range,
                  "score": round(r.score, 4)},
-                seq := seq + 1,
             )
-    yield sse_event("tool_call", {
+    yield emit("tool_call", {
         "id": str(time.time_ns()),
         "name": "knowledge_retrieval",
         "args": {"query": query[:50]},
@@ -252,12 +338,12 @@ async def stream_score(
         "confidence_band": meta["confidence_band"],
         "semantic_ok": meta["semantic_ok"],
         "hint": hint,
-    }, seq := seq + 1)
+    })
 
-    # 无可用依据 → 拒答事件（P2.4 降级提示），不调 LLM
+    # 无可用依据 → 拒答事件（P2.4 降级提示），不调 LLM（零成本，不缓存）
     if hint is not None and not results:
-        yield sse_event("thinking", {"stage": "NO_EVIDENCE", "hint": hint}, seq := seq + 1)
-        yield sse_event("done", {}, seq := seq + 1)
+        yield emit("thinking", {"stage": "NO_EVIDENCE", "hint": hint})
+        yield emit("done", {})
         return
 
     # 组装 rubric + chunks → Prompt
@@ -289,7 +375,7 @@ async def stream_score(
     # DeepSeek 响应带 prompt_cache_hit/miss_tokens，累加透传评测平台按命中价计成本
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
                    "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 0}
-    yield sse_event("thinking", {"stage": "REASONING"}, seq := seq + 1)
+    yield emit("thinking", {"stage": "REASONING"})
     full_text = ""
     splitter = ThinkingAnswerSplitter()
     try:
@@ -301,39 +387,41 @@ async def stream_score(
                 if not piece:
                     continue
                 if kind == "reasoning":
-                    yield sse_event("reasoning", {"delta": piece}, seq := seq + 1)
+                    yield emit("reasoning", {"delta": piece})
                 else:
                     full_text += piece
-                    yield sse_event("answer", {"delta": piece}, seq := seq + 1)
-                    yield sse_event("thought", {"delta": piece}, seq := seq + 1)
+                    yield emit("answer", {"delta": piece})
+                    yield emit("thought", {"delta": piece})
         for kind, piece in splitter.flush():
             if not piece:
                 continue
             if kind == "reasoning":
-                yield sse_event("reasoning", {"delta": piece}, seq := seq + 1)
+                yield emit("reasoning", {"delta": piece})
             else:
                 full_text += piece
-                yield sse_event("answer", {"delta": piece}, seq := seq + 1)
-                yield sse_event("thought", {"delta": piece}, seq := seq + 1)
+                yield emit("answer", {"delta": piece})
+                yield emit("thought", {"delta": piece})
     except CircuitOpenError:
-        yield sse_event("thinking", {"stage": "LLM_DOWN"}, seq := seq + 1)
-        yield sse_event("usage", total_usage, seq := seq + 1)
-        yield sse_event("done", {"content": full_text}, seq := seq + 1)
+        yield emit("thinking", {"stage": "LLM_DOWN"})
+        yield emit("usage", total_usage)
+        yield emit("done", {"content": full_text})
         return
 
     # 解析分数（prompt 要求末行 `分数: X`，_RE_TOTAL_SCORE 兜底）+ 范围校验 → score 事件
     # P8：空输出/无分/越界 → score=None + hint（人工评分兜底），杜绝越界分/负分落库
     score_val, score_hint = _extract_score(full_text, float(dim.max_score or 0))
-    yield sse_event(
+    yield emit(
         "score",
         {"score": score_val, "comment": full_text[:2000], "hint": score_hint},
-        seq := seq + 1,
     )
-    yield sse_event("usage", total_usage, seq := seq + 1)
+    yield emit("usage", total_usage)
     # done 带结构化分数（§5.1 扩展：评测端直接取 score，不依赖正则；解析不到为 null）
-    yield sse_event(
-        "done", {"content": full_text, "score": score_val, "hint": score_hint}, seq := seq + 1
+    yield emit(
+        "done", {"content": full_text, "score": score_val, "hint": score_hint}
     )
+    # ST1：正常走完 AI 评分（已发 done）→ 写缓存，后续同 bid×dim 重复评分直接重放。
+    # 注意：async for 消费到 StopIteration 才会执行到这（即 done 已逐帧发出后落缓存）。
+    await _save_score_frames(cache_key, frames)
 
 
 # ==================== P3.4：暂存 / 提交 / 锁定 ====================

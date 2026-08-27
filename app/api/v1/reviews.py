@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import require_roles
 from app.core.config import settings
 from app.core.database import get_db_session, session_factory
+from app.core.redis import get_redis, redis_warn_once
 from app.models.expert import Expert
 from app.models.user import Role, User
 from app.schemas.review import ChatRequest, ReviewCreate, ReviewOut, SaveScoreRequest
@@ -38,29 +39,9 @@ logger = structlog.get_logger(__name__)
 
 router = APIRouter(tags=["reviews"])
 
-_idem_pool = None
-_last_redis_warn = 0.0
-
-
 async def _idem_redis():
-    """Redis 连接池单例（幂等检查用）。"""
-    import redis.asyncio as aioredis
-
-    from app.core.config import settings
-
-    global _idem_pool
-    if _idem_pool is None:
-        _idem_pool = aioredis.from_url(settings.redis_url, decode_responses=True)
-    return _idem_pool
-
-
-async def _redis_warn_once(tag: str, error: str) -> None:
-    """Redis 故障限频告警（30s 内只打一次，防 SSE 每帧都刷屏）。"""
-    global _last_redis_warn
-    now = time.monotonic()
-    if now - _last_redis_warn > 30:
-        _last_redis_warn = now
-        logger.warning(tag, error=error)
+    """Redis 连接池单例（幂等/断流续推/评分缓存共用 app.core.redis.get_redis）。"""
+    return get_redis()
 
 
 async def _check_idempotency(key: str, review_id: str) -> None:
@@ -76,7 +57,7 @@ async def _check_idempotency(key: str, review_id: str) -> None:
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001  Redis 不可用 → 放行
-        await _redis_warn_once("review.idem_redis_down", str(e))
+        await redis_warn_once("review.idem_redis_down", str(e))
         return
     if not ok:
         raise HTTPException(
@@ -102,7 +83,7 @@ async def _cache_sse_frame(review_id: str, frame: str) -> None:
         await r.rpush(key, frame)
         await r.expire(key, _SSE_CACHE_TTL)
     except Exception as e:  # noqa: BLE001
-        await _redis_warn_once("review.sse_cache_down", str(e))
+        await redis_warn_once("review.sse_cache_down", str(e))
 
 
 async def _load_sse_cache(review_id: str) -> list[str] | None:
@@ -115,7 +96,7 @@ async def _load_sse_cache(review_id: str) -> list[str] | None:
         frames = await r.lrange(f"sse:cache:{review_id}", 0, -1)
         return frames if frames else None
     except Exception as e:  # noqa: BLE001
-        await _redis_warn_once("review.sse_cache_read_down", str(e))
+        await redis_warn_once("review.sse_cache_read_down", str(e))
         return None
 
 

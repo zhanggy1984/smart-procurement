@@ -211,9 +211,12 @@ async def _reset_state():
     模拟"每测试全新连接"，避免前序测试遗留连接污染。
     """
     import app.api.v1.reviews as reviews_mod
+    import app.core.redis as redis_core
     import app.tasks.dispatch as dispatch_mod
 
-    reviews_mod._idem_pool = None
+    # 幂等/SSE 续推/评分缓存连接已收编到 app.core.redis 单例（reviews_mod._idem_pool
+    # 已删除），重置单例模拟"每测试全新连接"，避免前序测试遗留连接污染
+    redis_core._redis = None
     dispatch_mod._pool = None
     await _truncate_all()
     await _seed_base()

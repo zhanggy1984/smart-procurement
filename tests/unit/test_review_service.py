@@ -157,6 +157,21 @@ def _find_tool_call(frames: list[str]) -> dict:
     raise AssertionError("未找到 tool_call 事件")
 
 
+def _noop_redis(monkeypatch):
+    """评分缓存 mock：不真连 Redis（ST1 缓存读 miss、写 no-op）。
+
+    单测原则：不真连基础设施。stream_score AI 分支自 ST1 起会 get_redis()
+    读/写评分缓存，未 mock 会真实打到 shared-redis（污染共享实例）。
+    """
+    redis = MagicMock()
+    redis.lrange = AsyncMock(return_value=None)  # miss → 走真实流
+    redis.delete = AsyncMock()
+    redis.rpush = AsyncMock()
+    redis.expire = AsyncMock()
+    monkeypatch.setattr(svc, "get_redis", lambda: redis)
+    return redis
+
+
 @pytest.mark.asyncio
 async def test_stream_score_tool_call_meta(monkeypatch):
     """评分 stream_score：tool_call 事件透出检索质量元信息（RETRIEVE_RESULT_SCHEMA）。
@@ -194,6 +209,7 @@ async def test_stream_score_tool_call_meta(monkeypatch):
     client = MagicMock()
     client.chat_stream = _fake_stream
     monkeypatch.setattr(svc, "get_client", lambda: client)
+    _noop_redis(monkeypatch)
 
     frames = [f async for f in svc.stream_score(session, review_id="R1", expert_id="E1")]
     tool = _find_tool_call(frames)
@@ -256,6 +272,7 @@ async def test_stream_score_out_of_range_score_null_hint(monkeypatch):
     client = MagicMock()
     client.chat_stream = _fake_stream
     monkeypatch.setattr(svc, "get_client", lambda: client)
+    _noop_redis(monkeypatch)
 
     frames = [f async for f in svc.stream_score(session, review_id="R1", expert_id="E1")]
     score_ev = [fr for fr in frames if "\nevent: score\n" in fr][0]

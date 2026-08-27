@@ -150,6 +150,12 @@ async def set_configs(
             {"key": key, "value": value, "desc": _DEFAULTS[key][4], "op": operator_id},
         )
     await session.commit()
+    # ST1 评分缓存失效：llm.*（温度/Token 等）变更会影响评分输出 → 全量失效。
+    # 懒导入防环：config_service → review_service → deepseek_client → config_service。
+    if any(k.startswith("llm.") for k, _ in normalized):
+        from app.services.review_service import flush_score_cache
+
+        await flush_score_cache()
     logger.info("config.set", keys=[k for k, _ in normalized], operator=operator_id)
     return [_build_item(k) for k in _DEFAULTS]
 
