@@ -90,6 +90,8 @@ async def import_all(data_dir: Path, clear: bool) -> None:
                         "email": u.get("email"),
                         "phone": u.get("phone"),
                         "is_active": u["is_active"],
+                        # 自查 #6：显式带标记（生成器为合成演示账号写 False；缺省 False 防旧 JSON）
+                        "must_change_password": u.get("must_change_password", False),
                     }
                     for u in users
                 ],

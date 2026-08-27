@@ -86,6 +86,10 @@ class Settings(BaseSettings):
     jwt_access_token_expire_minutes: int = 30
     jwt_refresh_token_expire_days: int = 7
     fernet_key: str = ""  # 空 => 启动时自动生成（生产必填）
+    # 登录安全（自查 #6，solution.md S4）：登录接口 IP 级限流（5 次/min，超出 429 + 15min 冷却）
+    login_rate_limit: int = 5  # 每 IP 每窗口最大登录尝试次数
+    login_rate_window_seconds: int = 60  # 固定窗口（1 分钟）
+    login_cooldown_seconds: int = 900  # 超出后冷却时长（15 分钟）
 
     # ========== 业务参数 ==========
     conflict_employment_years: int = 3

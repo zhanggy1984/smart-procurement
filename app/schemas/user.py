@@ -22,6 +22,7 @@ class UserOut(BaseModel):
     email: Optional[str] = None
     phone: Optional[str] = None
     is_active: bool
+    must_change_password: bool = False
     created_at: Optional[datetime] = None
 
 

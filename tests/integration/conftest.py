@@ -123,7 +123,9 @@ async def _seed_base() -> None:
     def _u(uid: str, username: str, role: str, display: str) -> User:
         return User(user_id=uid, username=username, password_hash=h, role=role,
                     display_name=display, email=f"{username}@itest.local",
-                    is_active=True, created_at=now, updated_at=now)
+                    is_active=True, created_at=now, updated_at=now,
+                    # 自查 #6：ITEST 种子账号免首登强改（否则业务 API 全被 403 拦截）
+                    must_change_password=False)
 
     users = [
         _u("ITEST-U-ADMIN", "admin", Role.ADMIN, "系统管理员"),

@@ -404,6 +404,8 @@ def generate_experts(rng: random.Random, fake: Faker, n: int) -> tuple[list[dict
                 "email": experts[-1]["email"],
                 "phone": experts[-1]["phone"],
                 "is_active": status != "BLACKLISTED",
+                # 自查 #6：合成演示账号免首登强改（验收/演示脚本零影响）
+                "must_change_password": False,
             }
         )
     return experts, users
@@ -460,6 +462,8 @@ def generate_suppliers(rng: random.Random, fake: Faker, n: int) -> tuple[list[di
                 "email": f"{supplier_id.lower()}@example.com",
                 "phone": fake.phone_number(),
                 "is_active": not blacklisted,
+                # 自查 #6：合成演示账号免首登强改（验收/演示脚本零影响）
+                "must_change_password": False,
             }
         )
     return suppliers, users
@@ -853,6 +857,8 @@ def generate_admin_users(rng: random.Random, fake: Faker) -> list[dict]:
             "email": "admin@example.com",
             "phone": fake.phone_number(),
             "is_active": True,
+            # 自查 #6：合成演示账号免首登强改（验收/演示脚本零影响）
+            "must_change_password": False,
         }
     )
     for i in range(1, 3):
@@ -866,6 +872,8 @@ def generate_admin_users(rng: random.Random, fake: Faker) -> list[dict]:
                 "email": f"pm{i}@example.com",
                 "phone": fake.phone_number(),
                 "is_active": True,
+                # 自查 #6：合成演示账号免首登强改（验收/演示脚本零影响）
+                "must_change_password": False,
             }
         )
     return users

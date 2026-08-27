@@ -156,6 +156,8 @@ async def import_experts(
             email=email,
             phone=phone,
             is_active=True,
+            # 自查 #6：导入账号统一初始密码 → 首登强制改密
+            must_change_password=True,
             created_at=now,
             updated_at=now,
         )

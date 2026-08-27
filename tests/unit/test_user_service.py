@@ -149,3 +149,49 @@ async def test_list_users_keyword():
     items, total = await list_users(session, page=1, page_size=20, keyword="pm")
     assert total == 1
     assert len(items) == 1
+
+
+# ==================== 自查 #6：改密（change_password） ====================
+
+
+@pytest.mark.asyncio
+async def test_change_password_wrong_old_password():
+    """旧密码错误 → InvalidOldPasswordError，不提交。"""
+    from app.core import security
+    from app.services.user_service import InvalidOldPasswordError, change_password
+
+    session = AsyncMock()
+    user = MagicMock()
+    user.password_hash = security.hash_password("Smart@2026")
+    with pytest.raises(InvalidOldPasswordError):
+        await change_password(session, user, old_password="Wrong@999", new_password="New@Pass123")
+    session.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_change_password_weak_new_password():
+    """新密码不满足复杂度 → PasswordStrengthError，不提交。"""
+    from app.core import security
+    from app.services.user_service import change_password
+
+    session = AsyncMock()
+    user = MagicMock()
+    user.password_hash = security.hash_password("Smart@2026")
+    with pytest.raises(security.PasswordStrengthError):
+        await change_password(session, user, old_password="Smart@2026", new_password="123")
+    session.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_change_password_success():
+    """旧密码正确 + 新密码合规 → 哈希更新 + 清首登强改标记 + 提交。"""
+    from app.core import security
+    from app.services.user_service import change_password
+
+    session = AsyncMock()
+    user = MagicMock()
+    user.password_hash = security.hash_password("Smart@2026")
+    await change_password(session, user, old_password="Smart@2026", new_password="New@Pass123")
+    assert user.must_change_password is False
+    assert security.verify_password("New@Pass123", user.password_hash)
+    session.commit.assert_awaited_once()

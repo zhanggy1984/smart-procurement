@@ -47,6 +47,19 @@ async def _neo4j(cypher: str) -> list:
         return await (await s.run(cypher)).data()
 
 
+async def _assign_lot_expert(lot_id: str, expert_id: str, dim_ids: list[str]) -> None:
+    """前置专家-标段分配（create_review 归属校验必需，P4.2 分配数据直接 ORM 落库）。
+
+    与 test_review_api.py 同款 helper：2537281 起 create_review 要求专家已分配
+    标段且维度在负责维度内，否则 403。存量一致性测试缺此步，补上。
+    """
+    from app.models.lot_expert_assignment import LotExpertAssignment
+
+    async with session_factory() as s:
+        s.add(LotExpertAssignment(lot_id=lot_id, expert_id=expert_id, dimension_ids=dim_ids))
+        await s.commit()
+
+
 # ==================== 场景 1：Expert → outbox → Neo4j ====================
 
 
@@ -136,6 +149,8 @@ async def test_blacklist_suspends_non_awarded_review(client, admin_headers, pm_h
     r = await client.post(f"/api/v1/lots/{lot['lot_id']}/close-bidding", headers=pm_headers)
     assert r.json()["risk"] == "LOW"
     dims = (await client.get(f"/api/v1/lots/{lot['lot_id']}/dimensions", headers=pm_headers)).json()["items"]
+    # 2537281 起 create_review 校验专家分配归属：先给 exp_headers（ITEST-E1）分配本标段
+    await _assign_lot_expert(lot["lot_id"], "ITEST-E1", [dims[0]["dimension_id"]])
     r = await client.post("/api/v1/reviews", headers=exp_headers,
                           json={"bid_id": bids[0], "dimension_id": dims[0]["dimension_id"]})
     review_id = r.json()["review_id"]

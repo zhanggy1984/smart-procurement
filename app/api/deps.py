@@ -23,11 +23,13 @@ from app.services import user_service
 _bearer = HTTPBearer(auto_error=False)
 
 
-async def get_current_user(
-    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
-    session: AsyncSession = Depends(get_db_session),
+async def _resolve_current_user(
+    credentials: HTTPAuthorizationCredentials | None,
+    session: AsyncSession,
+    *,
+    check_must_change: bool,
 ) -> User:
-    """从 access_token 解析当前用户。无效/过期/禁用统一 401。"""
+    """JWT 解析当前用户（有效/存在/active）。check_must_change=True 时首登强改 403。"""
     if credentials is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -49,7 +51,30 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="用户不存在或已禁用",
         )
+    # 自查 #6：首登强改——未改密账号除改密端点外业务 API 一律 403
+    if check_must_change and getattr(user, "must_change_password", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="首次登录必须修改初始密码",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     return user
+
+
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    session: AsyncSession = Depends(get_db_session),
+) -> User:
+    """从 access_token 解析当前用户。无效/过期/禁用 401；首登未改密 403。"""
+    return await _resolve_current_user(credentials, session, check_must_change=True)
+
+
+async def get_current_user_allow_change_password(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    session: AsyncSession = Depends(get_db_session),
+) -> User:
+    """改密端点专用：鉴权但不校验首登强改（否则未改密账号进不来改密）。"""
+    return await _resolve_current_user(credentials, session, check_must_change=False)
 
 
 def require_roles(*roles: str) -> Callable[..., Awaitable[User]]:

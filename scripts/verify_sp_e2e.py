@@ -77,11 +77,14 @@ async def _ensure_verify_user(s, expert_name: str) -> None:
             display_name=expert_name,
             email="sp_verify@itest.local",
             is_active=True,
+            # 自查 #6：契约验证用户必须免首登强改（否则后续业务 API 全 403，契约全红）
+            must_change_password=False,
         ))
         await s.commit()
         print(f"  * 创建验证用户 sp_verify → display_name={expert_name}")
-    elif u.display_name != expert_name:
+    elif u.display_name != expert_name or u.must_change_password:
         u.display_name = expert_name
+        u.must_change_password = False  # 兼容存量 True 标记（列默认 TRUE 时会误伤）
         await s.commit()
         print(f"  * 复用 sp_verify，display_name 更新为 {expert_name}")
 

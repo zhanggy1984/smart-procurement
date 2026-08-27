@@ -39,5 +39,9 @@ class User(Base):
     email: Mapped[Optional[str]] = mapped_column(String(128))
     phone: Mapped[Optional[str]] = mapped_column(String(20))
     is_active: Mapped[bool] = mapped_column(Boolean, server_default=text("TRUE"))
+    # 首登强改（自查 #6）：True 时除改密端点外业务 API 一律 403。
+    # server_default=TRUE（fail-closed）：未显式指定（如手工 SQL 建号）的账号
+    # 首登强制改密；合成演示账号在导入时显式置 FALSE 保持脚本兼容。
+    must_change_password: Mapped[bool] = mapped_column(Boolean, server_default=text("TRUE"))
     created_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime)

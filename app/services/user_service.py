@@ -25,6 +25,10 @@ class InvalidRoleError(ValueError):
     """角色非法（非 Role.ALL 受控值）。"""
 
 
+class InvalidOldPasswordError(ValueError):
+    """旧密码错误（改密校验）。"""
+
+
 async def create_user(
     session: AsyncSession,
     *,
@@ -51,6 +55,8 @@ async def create_user(
         email=email,
         phone=phone,
         is_active=True,
+        # 自查 #6：新建账号首登强制改密（管理员建号 ≠ 用户自有密码）
+        must_change_password=True,
         created_at=now,
         updated_at=now,
     )
@@ -68,6 +74,26 @@ async def authenticate(session: AsyncSession, username: str, password: str) -> O
     if not user.is_active:
         return None
     return user
+
+
+async def change_password(
+    session: AsyncSession,
+    user: User,
+    *,
+    old_password: str,
+    new_password: str,
+) -> None:
+    """修改密码：验旧密码 → 复杂度校验 → bcrypt 更新 → 清除首登强改标记。
+
+    旧密码错误抛 InvalidOldPasswordError；新密码不满足复杂度抛 PasswordStrengthError。
+    """
+    if not security.verify_password(old_password, user.password_hash):
+        raise InvalidOldPasswordError("旧密码错误")
+    security.validate_password_strength(new_password)
+    user.password_hash = security.hash_password(new_password)
+    user.must_change_password = False
+    user.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    await session.commit()
 
 
 async def get_user(session: AsyncSession, user_id: str) -> Optional[User]:

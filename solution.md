@@ -2491,10 +2491,12 @@ CREATE TABLE system_config (
 
 | 方法 | 路径 | 权限 | 请求 | 响应 | 错误 |
 |---|---|---|---|---|---|
-| POST | `/auth/login` | 任意 | `{username, password}` | `{access_token, refresh_token, token_type, user}` | 401 用户名或密码错误 |
-| POST | `/auth/refresh` | 任意 | `{refresh_token}` | `{access_token, token_type}` | 401 无效/过期 |
+| POST | `/auth/login` | 任意 | `{username, password}` | `{access_token, refresh_token, token_type, user}` | 401 用户名或密码错误 / 429 IP 限流超阈值 |
+| POST | `/auth/refresh` | 任意 | `{refresh_token}` | `{access_token, refresh_token, token_type}`（轮换：旧 token 失效并返还新 refresh_token） | 401 无效/过期/已轮换 |
+| POST | `/auth/change-password` | 任意 | `{old_password, new_password}` | `{message}` | 400 旧密码错误/复杂度不达标 |
 
-`user` = `{user_id, username, role, display_name, email, phone}`；登录后按 `role` 路由到对应端菜单。
+`user` = `{user_id, username, role, display_name, email, phone, must_change_password}`；登录后按 `role` 路由到对应端菜单。
+首登强改：`must_change_password=true` 账号登录成功但业务 API 一律 403（改密端点豁免），改密后恢复。
 
 **项目管理**
 

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import re
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -59,9 +60,11 @@ def validate_password_strength(password: str) -> None:
 
 
 def _create_token(user_id: str, token_type: str, expires_delta: timedelta) -> str:
+    # jti：refresh 轮换唯一标识（自查 #6，白名单用后即弃）
     payload: dict[str, Any] = {
         "sub": user_id,
         "type": token_type,
+        "jti": uuid.uuid4().hex,
         "iat": datetime.now(timezone.utc),
         "exp": datetime.now(timezone.utc) + expires_delta,
     }
@@ -101,3 +104,12 @@ def get_token_subject(token: str, expected_type: str) -> str:
     if not subject:
         raise jwt.InvalidTokenError("token missing sub")
     return subject
+
+
+def get_token_jti(token: str, expected_type: str) -> str:
+    """解码 token 并返回 jti（refresh 轮换白名单）。无 jti（旧令牌）抛异常。"""
+    payload = decode_token(token, expected_type)
+    jti = payload.get("jti")
+    if not jti:
+        raise jwt.InvalidTokenError("token missing jti")
+    return jti
