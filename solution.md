@@ -550,9 +550,12 @@ fields = [
     FieldSchema("content",       DataType.VARCHAR, max_length=65535), # 原文
     FieldSchema("embedding",     DataType.FLOAT_VECTOR, dim=1024),    # BGE-M3 向量
     FieldSchema("chapter_title", DataType.VARCHAR, max_length=256),   # 章节
-    FieldSchema("page_no",       DataType.INT32),                     # 页码
+    FieldSchema("page_range",    DataType.VARCHAR, max_length=32),    # 页码范围 "1"/"1-2"/"0"（P8.2）
     FieldSchema("chunk_index",   DataType.INT32),
     FieldSchema("source_file",   DataType.VARCHAR, max_length=512),
+    FieldSchema("heading_level", DataType.INT32),                     # 标题层级（P8.2 参考 good-question）
+    FieldSchema("source_type",   DataType.VARCHAR, max_length=16),    # table/list/code/paragraph
+    FieldSchema("token_count",   DataType.INT32),                     # 分块 token 数
 ]
 
 schema = CollectionSchema(fields, description="标书文档分块向量库")
@@ -575,7 +578,7 @@ results = collection.search(
     param={"metric_type": "IP", "params": {"nprobe": 16}},
     limit=20,
     expr='lot_id == "LOT-01" && bid_id == "BID-001"',  # 标量过滤限定范围
-    output_fields=["content", "chapter_title", "page_no", "source_file"]
+    output_fields=["content", "chapter_title", "page_range", "source_file"]
 )
 
 # 跨标书对比检索（评后汇总用，项目经理端）
@@ -2649,7 +2652,7 @@ CREATE TABLE system_config (
 | chunk_size | 500-1000 tokens | 弹性区间，优先在段落边界切割 |
 | overlap | 100 tokens | 相邻 chunk 的上下文重叠 |
 | 编码方式 | GPT-4 同款 tiktoken (cl100k_base) | 与 DeepSeek tokenizer 近似，误差 < 3% |
-| 元数据 | chapter_title, page_no, lot_id, bid_id | 用于 Milvus 标量过滤 + 引用溯源 |
+| 元数据 | chapter_title, page_range, heading_level, source_type, token_count, lot_id, bid_id | 页码 `@@PAGE:n@@` 协议逐页插标、chunker 解析 section 级 `[start,end]`；无页码（DOCX/MD/TXT）恒 `[0,0]`。用于 Milvus 标量过滤 + 引用溯源 |
 
 ### 5.2 Embedding 模型
 
@@ -2678,9 +2681,12 @@ fields = [
     FieldSchema(name="content", dtype=DataType.VARCHAR, max_length=65535),   # 原文（debug + 引用渲染）
     FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=1024),    # BGE-M3 向量
     FieldSchema(name="chapter_title", dtype=DataType.VARCHAR, max_length=256),
-    FieldSchema(name="page_no", dtype=DataType.INT32),                       # 页码
+    FieldSchema(name="page_range", dtype=DataType.VARCHAR, max_length=32),   # "1"/"1-2"/"0"（P8.2 真实页码）
     FieldSchema(name="chunk_index", dtype=DataType.INT32),                   # 块序号
     FieldSchema(name="source_file", dtype=DataType.VARCHAR, max_length=512),
+    FieldSchema(name="heading_level", dtype=DataType.INT32),                 # 标题层级
+    FieldSchema(name="source_type", dtype=DataType.VARCHAR, max_length=16),  # table/list/code/paragraph
+    FieldSchema(name="token_count", dtype=DataType.INT32),                   # 分块 token 数
 ]
 
 schema = CollectionSchema(fields, description="标书文档分块向量库")
