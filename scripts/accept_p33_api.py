@@ -3,7 +3,7 @@
 覆盖 task.md P3.3 验收：
 - 上传标书（含报价）→ 解析 PARSED → 置 FROZEN
 - POST /reviews 创建评审工作台（校验 FROZEN + 维度归属）
-- POST /reviews/{id}/score SSE：AI 维度事件序 thinking→source→thought→score→done
+- POST /reviews/{id}/score SSE：AI 维度事件序 meta→thinking→source→thought→score→done
 - 报价维度 → event:price_calc 纯公式（不走 AI）
 - POST /reviews/{id}/chat SSE：对话流 + conversation_message 落库 + 摘要
 - 评分幂等：同 X-Idempotency-Key 重复 → 422
@@ -207,7 +207,7 @@ async def main() -> None:
         check("事件序含 thinking", "thinking" in ev_names, str(ev_names))
         check("事件序含 thought（AI 流式）", "thought" in ev_names, str(ev_names))
         check("事件序含 done", "done" in ev_names, str(ev_names))
-        check("SSE 事件带 id 序号", len(events) >= 4 and events[0][0] == "thinking", str(events[:2]))
+        check("score SSE 首帧 meta（契约 §5.1）", len(events) >= 4 and events[0][0] == "meta", str(events[:2]))
 
         # 幂等：同 key 重复 → 422
         async with httpx.AsyncClient(timeout=120.0) as client:

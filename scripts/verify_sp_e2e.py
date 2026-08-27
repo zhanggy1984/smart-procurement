@@ -11,13 +11,13 @@
    - 每个事件 data 都内置 ts（unix ms）
    - done 收尾
 2. AI 路径条件断言（出现 reasoning 时）：
-   - reasoning/answer/thought 逐 delta 双发（事件数一致）
+   - reasoning 思考独立流非空；answer/thought 结论段同段双发（事件数一致）
    - usage 存在（真实 token 聚合）
    - answer 拼接 == done.content（契约 done 是最终输出）
 3. 报告实际走的分支（AI / NO_EVIDENCE / LLM_DOWN），降级分支不算契约失败，
    但会提示验证不完整。
 
-选样：一条「非报价维度」评审（报价走公式分支，无 reasoning 双发，不作本脚本目标）。
+选样：一条「非报价维度」评审（报价走公式分支，无 AI 思考流，不作本脚本目标）。
 认证：复用/新建 sp_verify 用户（display_name=专家名，_resolve_expert 按 name 反查 expert_id）。
 """
 
@@ -114,7 +114,8 @@ def _parse_sse(lines: list[str]) -> list[dict]:
 async def _verify_chat(client: httpx.AsyncClient, token: str, review_id: str) -> None:
     """chat SSE 契约：meta 首帧 → thinking(CHAT) → reasoning/answer/thought 双发 → usage → done。
 
-    对话接口无检索动作，不做 tool_call 断言；done.content 需等于 answer 拼接。
+    对话接口为 agent 模式（function calling）：决策轮可能发 tool_call 事件（LLM 自主
+    决策，非硬性契约），断言聚焦三发对齐与 done 收尾；done.content 需等于 answer 拼接。
     """
     headers = {"Authorization": f"Bearer {token}"}
     async with client.stream(
@@ -192,12 +193,15 @@ async def main() -> None:
             print(f"\n[2] 分支: LLM_DOWN（断路器触发）—— 契约完整但 AI 路径未验证")
         elif reasoning_events:
             print(f"\n[2] AI 路径条件断言（reasoning 事件 {len(reasoning_events)} 个）")
-            # reasoning/answer/thought 同 delta 双发：三类事件数一致
+            # P7.x 思考契约：reasoning 是思考独立流（逐 delta，数量不定），answer/thought
+            # 只发结论段（同段双发，事件数一致）。流式切分设计下 reasoning 与 answer 天然
+            # 不等（3496621 起），不再要求三者事件数一致。
             n_ans = sum(1 for e in events if e["event"] == "answer")
             n_thought = sum(1 for e in events if e["event"] == "thought")
-            _check("reasoning/answer/thought 事件数一致",
-                   n_ans == len(reasoning_events) == n_thought,
-                   f"reasoning={len(reasoning_events)} answer={n_ans} thought={n_thought}")
+            _check("reasoning 存在（思考独立流）", len(reasoning_events) > 0,
+                   f"reasoning={len(reasoning_events)}")
+            _check("answer/thought 事件数一致", n_ans == n_thought,
+                   f"answer={n_ans} thought={n_thought}")
             _check("delta 均非空", all(e["data"].get("delta") for e in reasoning_events))
             usage = next((e for e in events if e["event"] == "usage"), None)
             _check("usage 存在", usage is not None)

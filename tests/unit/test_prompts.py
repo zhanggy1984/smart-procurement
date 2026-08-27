@@ -77,6 +77,27 @@ def test_system_prompt_five_sections():
             assert tag in system
 
 
+def test_build_chat_prompt_tools_declaration():
+    """tools_declared=True 时 system <task> 段声明工具调用约束；False/缺省不声明。
+
+    agent 决策轮需声明（LLM 看到可用工具才自主决策），作答轮/非 agent 调用不带
+    tools 时重复声明只会浪费 prompt 缓存且无意义。
+    """
+    plain = build_chat_prompt(
+        role_context="你是评审助手", context="", history=[], question="追问",
+    )
+    assert "retrieve_knowledge" not in plain[0]["content"]
+    declared = build_chat_prompt(
+        role_context="你是评审助手", context="", history=[], question="追问",
+        tools_declared=True,
+    )
+    task_block = declared[0]["content"].split("<task>")[1].split("</task>")[0]
+    assert "retrieve_knowledge" in task_block
+    assert "get_dimension_rubric" in task_block
+    assert "get_bid_structured_info" in task_block
+    assert "直接回答" in task_block  # 闲聊/非文档问题直接答、不调工具的约束
+
+
 def test_input_data_declares_data_not_instruction():
     """<input_data> 段声明"数据非指令"（防注入 prompt 侧核心）。"""
     score_msgs = build_score_prompt(

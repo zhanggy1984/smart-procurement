@@ -178,6 +178,99 @@ class DeepSeekClient:
                 logger.warning("llm.retry", status=status, attempt=attempts, delay=delay, error=str(e))
                 await asyncio.sleep(delay)
 
+    async def chat_stream_agent(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        *,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> AsyncIterator[dict]:
+        """SSE 流式调用，支持 DeepSeek function calling（agent 决策轮）。
+
+        供 agent 编排消费（决策轮事件不作 SSE 三发契约输出，由上层决定取舍），yield 事件：
+        - {"type": "content", "delta": str}：正文增量（含 <thinking>/<answer> 标签原文，
+          由上层 ThinkingAnswerSplitter 切分）
+        - {"type": "tool_call", "tool_calls": [...]}：finish_reason=="tool_calls" 时一次性
+          flush 完整 tool_calls（arguments 为 JSON 字符串，调用方 json.loads 取参数）
+        - {"type": "usage", "usage": dict}：流末尾 include_usage 的 usage chunk
+
+        重试/断路器语义与 chat_stream 完全一致（429/5xx 退避、OPEN 熔断、流开始前重试）。
+        """
+        if temperature is None:
+            temperature = float(config_service.get_sync("llm.temperature"))
+        if max_tokens is None:
+            max_tokens = int(config_service.get_sync("llm.max_tokens"))
+        await self._circuit.acquire()
+        if not settings.deepseek_enabled:
+            raise CircuitOpenError("AI 服务已停用（DEEPSEEK_ENABLED=false），请人工评审")
+        attempts = 0
+        while True:
+            try:
+                stream = await self._client.chat.completions.create(
+                    model=settings.deepseek_model,
+                    messages=messages,
+                    tools=tools,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    stream=True,
+                    stream_options={"include_usage": True},
+                )
+                # tool_calls 按 index 累加（id/name 首个分片携带，arguments 增量拼接）
+                tool_acc: dict[int, dict] = {}
+                async for chunk in stream:
+                    if chunk.usage:
+                        yield {"type": "usage", "usage": chunk.usage.model_dump()}
+                        continue
+                    if not chunk.choices:
+                        continue
+                    choice = chunk.choices[0]
+                    delta = choice.delta
+                    if delta and delta.tool_calls:
+                        for tc in delta.tool_calls:
+                            entry = tool_acc.setdefault(
+                                tc.index, {"id": None, "name": "", "arguments": ""}
+                            )
+                            if tc.id:
+                                entry["id"] = tc.id
+                            fn = getattr(tc, "function", None)
+                            if fn:
+                                if fn.name:
+                                    entry["name"] = fn.name
+                                if fn.arguments:
+                                    entry["arguments"] += fn.arguments
+                    if delta and delta.content:
+                        yield {"type": "content", "delta": delta.content}
+                    # 结束信号：finish_reason=="tool_calls" 的 chunk 通常带着最后一个 tool_calls
+                    if choice.finish_reason == "tool_calls" and tool_acc:
+                        yield {
+                            "type": "tool_call",
+                            "tool_calls": [
+                                {"id": e["id"], "type": "function",
+                                 "function": {"name": e["name"], "arguments": e["arguments"]}}
+                                for e in tool_acc.values()
+                            ],
+                        }
+                        tool_acc.clear()
+                await self._circuit.record_success()
+                return
+            except CircuitOpenError:
+                raise
+            except Exception as e:  # noqa: BLE001  openai 各类异常统一按状态码处理
+                status = getattr(e, "status_code", None)
+                schedule = _retry_schedule(status) if status else _BACKOFF_5XX
+                if _is_fuse_failure(e):
+                    await self._circuit.record_failure()
+                if isinstance(e, (openai.AuthenticationError, openai.PermissionDeniedError)):
+                    logger.error("llm.auth_failed", error=str(e))
+                    raise
+                if attempts >= len(schedule):
+                    raise
+                delay = schedule[attempts]
+                attempts += 1
+                logger.warning("llm.retry", status=status, attempt=attempts, delay=delay, error=str(e))
+                await asyncio.sleep(delay)
+
     async def chat(
         self,
         messages: list[dict],

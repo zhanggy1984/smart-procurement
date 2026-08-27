@@ -9,6 +9,7 @@ SSE 帧：`id:{seq}\nevent:{event}\ndata:{json}\n\n`（core/sse.py）。
 """
 
 import re
+import time
 from typing import Optional
 
 import structlog
@@ -25,13 +26,13 @@ from app.models.user import Role, User
 from app.schemas.review import ChatRequest, ReviewCreate, ReviewOut, SaveScoreRequest
 from app.services import review_service as svc
 from app.services import conversation_service as conversation
+from app.ai.agent import CHAT_TOOLS, ToolContext, stream_agent
 from app.ai.llm.deepseek_client import get_client
 from app.ai.llm.prompts import ThinkingAnswerSplitter, build_chat_prompt
-from app.ai.llm.text_cleaner import clean_bid_text
-from app.ai.rag.query_cleaner import clean_query
-from app.ai.rag.retriever import retrieve_with_meta
 from app.core.sse import sse_event
 from app.models.bid_document import BidDocument
+from app.models.conversation import ConversationMessage
+from app.models.project import ScoringDimension
 
 logger = structlog.get_logger(__name__)
 
@@ -245,20 +246,26 @@ async def stream_chat(
             if review is None or review.expert_id != expert_id:
                 yield sse_event("error", {"detail": "评审记录不存在或非本人任务"}, 0)
                 return
-            # 检索标书证据注入：chat 首问无历史上下文，缺依据 LLM 会编造通用方案
-            # （评测 run 165 根因）；dimension=None 走纯向量召回，避免维度关键词偏置。
+            # agent 模式（function calling）：检索由 LLM 自主决策（调 retrieve_knowledge 工具），
+            # 不再固定预检索；bid/dimension 供工具执行器组装上下文（retrieve 需 lot_id/bid_id，
+            # rubric 工具需 dimension）。决策轮事件静默（保三发对齐契约），作答轮统一走
+            # splitter 三发，full 仅存 answer 段（思考不进对话历史，避免污染摘要）。
             bid = await s.get(BidDocument, review.bid_id)
-            chunks: list[str] = []
-            if bid is not None:
-                # P7.x query 清洗：用户问题进检索前规则化去噪（客套/emoji/全角词
-                # 稀释向量编码、污染路2 query 词窗）；检索后 chunks 再走 PII 清洗
-                results, _hint = await retrieve_with_meta(
-                    clean_query(body.question), lot_id=bid.lot_id, bid_id=bid.bid_id,
-                    dimension=None, top_k=8,
+            dimension = await s.get(ScoringDimension, review.dimension_id)
+            # 回指意图归队依赖：最近 user 消息原文（倒序，此时尚未写入当前问题）。
+            # _classify_intent 的 history 参数用它把"就这个/还有呢"延续到上一轮意图。
+            recent_user = (
+                await s.scalars(
+                    select(ConversationMessage)
+                    .where(ConversationMessage.review_id == review_id,
+                           ConversationMessage.dimension_id == review.dimension_id,
+                           ConversationMessage.role == "user")
+                    .order_by(ConversationMessage.dim_turn_number.desc())
+                    .limit(3)
                 )
-                # P7.x 输入侧清洗：检索结果进 <bid_content> 前规范化 + PII 脱敏
-                # （真实标书正文身份证/手机/邮箱明文进 prompt，LLM 会复述泄漏）
-                chunks = [clean_bid_text(r.content) for r in results if r.source in ("vector", "keyword")]
+            ).all()
+            ctx = ToolContext(session=s, review=review, bid=bid, dimension=dimension,
+                              history=[m.content for m in recent_user])
             await conversation.add_message(
                 s, review_id=review_id, dimension_id=review.dimension_id,
                 role="user", content=body.question,
@@ -266,9 +273,11 @@ async def stream_chat(
             context = await conversation.get_context(
                 s, review_id=review_id, dimension_id=review.dimension_id
             )
+            # P7.x tools 声明：agent 决策轮 system 声明工具可用与调用约束，LLM 自主决定是否调用
             prompt = build_chat_prompt(
                 role_context="你是标书评审专家助手，结合标书内容与当前评审上下文回答专家的追问。",
-                context=context, history=[], question=body.question, chunks=chunks,
+                context=context, history=[], question=body.question,
+                chunks=None, tools_declared=True,
             )
             seq = 1
             # 契约 meta 首帧（评测 §5.1）
@@ -286,31 +295,44 @@ async def stream_chat(
             total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
                            "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 0}
             try:
-                # P7.x：prompt 契约先 <thinking> 推理、再 <answer> 结论；reasoning 发推理段，
-                # answer/thought 只发结论段，full 仅存结论（思考不进对话历史，避免污染摘要）
-                splitter = ThinkingAnswerSplitter()
-                async for delta, u in get_client().chat_stream(prompt, max_tokens=2048):
-                    if u:
-                        for _k in total_usage:
-                            total_usage[_k] += u.get(_k, 0) or 0
-                    for kind, piece in splitter.feed(delta):
-                        if not piece:
-                            continue
-                        if kind == "reasoning":
-                            yield sse_event("reasoning", {"delta": piece}, seq := seq + 1)
-                        else:
-                            full += piece
-                            yield sse_event("answer", {"delta": piece}, seq := seq + 1)
-                            yield sse_event("thought", {"delta": piece}, seq := seq + 1)
-                for kind, piece in splitter.flush():
-                    if not piece:
-                        continue
-                    if kind == "reasoning":
-                        yield sse_event("reasoning", {"delta": piece}, seq := seq + 1)
-                    else:
-                        full += piece
-                        yield sse_event("answer", {"delta": piece}, seq := seq + 1)
-                        yield sse_event("thought", {"delta": piece}, seq := seq + 1)
+                # P7.x：agent 决策轮静默（工具决策不外发 reasoning/answer），作答轮 content
+                # 进 splitter 三发（reasoning/answer/thought 对齐）；三路兜底固定话术无
+                # <thinking> 标签 → 全文当 answer（降级契约不破）
+                async for ev in stream_agent(prompt, CHAT_TOOLS, ctx):
+                    etype = ev["type"]
+                    if etype == "tool_call":
+                        # 契约 tool_call 事件：评测端观测 LLM 决策调用的内部工具 + 检索质量元信息
+                        yield sse_event("tool_call", {
+                            "id": f"tool-{time.time_ns()}",
+                            "name": ev["name"],
+                            "args": ev["args"],
+                            "result": ev["result"],
+                            "status": ev["status"],
+                            "intent": ev["intent"],
+                        }, seq := seq + 1)
+                    elif etype == "answer":
+                        total_usage = dict(ev["usage"])
+                        splitter = ThinkingAnswerSplitter()
+                        for kind, piece in splitter.feed(ev["text"]):
+                            if not piece:
+                                continue
+                            if kind == "reasoning":
+                                yield sse_event("reasoning", {"delta": piece}, seq := seq + 1)
+                            else:
+                                full += piece
+                                yield sse_event("answer", {"delta": piece}, seq := seq + 1)
+                                yield sse_event("thought", {"delta": piece}, seq := seq + 1)
+                        for kind, piece in splitter.flush():
+                            if not piece:
+                                continue
+                            if kind == "reasoning":
+                                yield sse_event("reasoning", {"delta": piece}, seq := seq + 1)
+                            else:
+                                full += piece
+                                yield sse_event("answer", {"delta": piece}, seq := seq + 1)
+                                yield sse_event("thought", {"delta": piece}, seq := seq + 1)
+                    elif etype == "error":
+                        yield sse_event("error", {"detail": ev["message"]}, seq := seq + 1)
             finally:
                 if full.strip():
                     await conversation.add_message(

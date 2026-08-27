@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com/v1"
     deepseek_model: str = "deepseek-chat"
     deepseek_enabled: bool = True  # False => LLM 停用降级纯人工（P6.6 验收/降配开关）
+    agent_rule_override_enabled: bool = True  # False => 关闭 F3 规则否决权（LLM 未调工具时也信任直接答，回滚开关）
     deepseek_timeout: float = 60.0
     deepseek_max_retries: int = 3
     deepseek_circuit_breaker_threshold: int = 5
