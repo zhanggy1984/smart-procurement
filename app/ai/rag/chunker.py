@@ -1,13 +1,17 @@
-"""SmartDocumentChunker — 标题感知文档分块（P2.1 Step 3）。
+"""SmartDocumentChunker — 标题感知 + 段落优先文档分块（P2.1 Step 3）。
 
-设计目标（task.md P2.1 / P2.2）：
+设计目标（task.md P2.1 / P2.2 / P7.x 段落感知优化）：
 - 标题感知：按"第X章 / X.X / 一、 / （一）"等标题行优先切分，标题作为该章
   首个 chunk 内容前缀，同时写入 chapter_title 字段（Milvus 检索溯源用）。
-- 分块尺寸：单 chunk 落在 [min_tokens, max_tokens]，同一章节内超长正文用
-  滑窗切分，相邻 chunk 天然 overlap（步长 = max - overlap）。
+- 段落优先：段内超长正文优先按段落边界切分（空行 \\n\\n，无空行退化为单换行
+  \\n），段落为原子单元不切半，只在段落边界断开——避免 token 硬切在句/词中间，
+  保 chunk 语义完整（BGE 编码质量、引用溯源）。单段超长（长表格/连续文本无段落
+  信号）才退回 token 滑窗兜底。
+- 分块尺寸：单 chunk 落在 [min_tokens, max_tokens]，相邻 chunk 保留段落级
+  overlap（新 chunk 开头带上一 chunk 末尾段落尾部）。
 - 幂等/纯函数：chunk() 无副作用，同一输入输出完全一致（验收/单测可复现）。
 
-P2.2 单测覆盖：标题感知切分、递归二分、overlap 保留、超长文档截断、空文档。
+P2.2 单测覆盖：标题感知切分、段落边界断开、overlap 保留、超长截断、空文档。
 """
 
 from __future__ import annotations
@@ -84,7 +88,7 @@ class SmartDocumentChunker:
         source_file: str = "",
         page_no: int = 0,
     ) -> list[DocumentChunk]:
-        """把全文切成 DocumentChunk 列表（标题感知 + 滑窗 overlap）。
+        """把全文切成 DocumentChunk 列表（标题感知 + 段落优先 + 段落级 overlap）。
 
         返回空列表：空文档/全空白。chunk_index 全局递增，chunk_id 取
         `{bid_id}-{seq:04d}`，保证 Milvus 主键唯一且可复现。
@@ -96,9 +100,17 @@ class SmartDocumentChunker:
         chunks: list[DocumentChunk] = []
         seq = 0
         for title, body in sections:
-            # 标题并入该章正文首行，chunk 内容自包含（检索上下文完整）
             full = f"{title}\n{body}" if title else body
-            for piece in self._split_body(full):
+            # 短文档（含标题 ≤ max）整体保留：标题并入正文首行，chunk 自包含。
+            # 超长正文：段落切分纯 body，标题只作为该章首个 chunk 内容前缀——
+            # 不让标题参与段落/滑窗切分，避免标题行被拆成近空 chunk（设计不变量）。
+            if len(self.encoder.encode(full)) <= self.max_tokens:
+                pieces = [full]
+            else:
+                pieces = self._split_body(body)
+                if title and pieces:
+                    pieces[0] = f"{title}\n{pieces[0]}"
+            for piece in pieces:
                 chunks.append(
                     DocumentChunk(
                         chunk_id=f"{bid_id}-{seq:04d}",
@@ -139,16 +151,72 @@ class SmartDocumentChunker:
         return [(t, b) for t, b in sections if b.strip()]
 
     def _split_body(self, body: str) -> list[str]:
-        """把一段正文切成 [min, max] 的 chunk 列表。
+        """把一段超长正文切成 [min, max] 的 chunk 列表（段落优先，P7.x）。
 
-        长度未超 max 的段整体保留（短章不硬凑到 min，避免无意义填充）；
-        超长段用滑窗切（步长 = max - overlap），相邻 chunk 保留 overlap 上下文。
-        单段不足 min 的情况仅发生在文档整体很短的场景，允许（后续检索不受影响）。
+        入参为纯正文（不含标题，标题前缀由 chunk() 负责）。段落为原子单元
+        不切半，按段落边界断开（语义完整），相邻 chunk 保留上一 chunk 末尾
+        段落的 overlap 尾部；单段超 max（长表格/连续文本无段落信号）才退回
+        token 滑窗兜底（步长 = max - overlap，原逻辑）。
         """
         tokens = self.encoder.encode(body)
         if len(tokens) <= self.max_tokens:
             return [body]
 
+        paragraphs = self._split_paragraphs(body)
+        pieces: list[str] = []
+        cur: list[str] = []  # 当前 chunk 的段落（段落为原子单元）
+        cur_tokens = 0
+        for para in paragraphs:
+            p_tokens = len(self.encoder.encode(para))
+            if p_tokens > self.max_tokens:
+                # 单段超长：先 flush 当前累积，再对该段内部 token 滑窗（无段落信号兜底）
+                if cur:
+                    pieces.append("\n\n".join(cur))
+                    cur, cur_tokens = [], 0
+                pieces.extend(self._window_long_paragraph(para))
+                continue
+            if cur_tokens + p_tokens > self.max_tokens:
+                # 段落边界断开：flush 当前 chunk，新 chunk 带上一 chunk 末尾段落尾部
+                pieces.append("\n\n".join(cur))
+                cur, cur_tokens = self._paragraph_tail(cur)
+            cur.append(para)
+            cur_tokens += p_tokens
+        if cur:
+            pieces.append("\n\n".join(cur))
+        return pieces
+
+    @staticmethod
+    def _split_paragraphs(text: str) -> list[str]:
+        """按段落切分：空行（\\n\\n）为段落分隔；无空行退化为单换行（\\n）。
+
+        PDF 按页提取/ DOCX 逐段提取的文本段落信号各异：空行优先（排版规范的
+        文档），无空行时单换行也可作为段落边界（至少不切在句/词中间）。
+        """
+        paras = [p for p in re.split(r"\n\s*\n", text) if p.strip()]
+        if len(paras) > 1:
+            return paras
+        return [p for p in text.split("\n") if p.strip()]
+
+    def _paragraph_tail(self, paragraphs: list[str]) -> tuple[list[str], int]:
+        """取段落列表末尾凑近 overlap_tokens 的段落后缀（新 chunk 开头 overlap）。
+
+        段落为原子单元，overlap 按整段取（宁可略超 overlap_tokens 也不切半段），
+        保证相邻 chunk 边界上下文连续。
+        """
+        tail: list[str] = []
+        tail_tokens = 0
+        for para in reversed(paragraphs):
+            tail.append(para)
+            tail_tokens += len(self.encoder.encode(para))
+            if tail_tokens >= self.overlap_tokens:
+                break
+        return tail[::-1], tail_tokens
+
+    def _window_long_paragraph(self, para: str) -> list[str]:
+        """单段超 max_tokens 的 token 滑窗兜底（原 _split_body 逻辑，相邻保留 overlap）。"""
+        tokens = self.encoder.encode(para)
+        if len(tokens) <= self.max_tokens:
+            return [para]
         step = self.max_tokens - self.overlap_tokens
         pieces: list[str] = []
         start = 0

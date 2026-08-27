@@ -1,6 +1,7 @@
-"""P7.2 SmartDocumentChunker 单元测试（task.md：5 用例）。
+"""P7.2 SmartDocumentChunker 单元测试（task.md：5 用例 + P7.x 段落优先）。
 
-覆盖标题感知切分、递归二分/滑窗、overlap 保留、超长截断、空文档。
+覆盖标题感知切分、段落边界断开（段落不切半）、段落级 overlap 尾部、单段超长
+滑窗兜底、无空行退化单换行切分、超长截断、空文档。
 token 估算用 tiktoken cl100k_base（lazy），与 embedding 无关。
 """
 
@@ -62,6 +63,88 @@ def test_long_body_sliding_window(chunker):
     # overlap 保留：相邻 chunk 有内容重叠
     assert chunks[0].content in chunks[1].content or chunks[1].content in chunks[0].content \
         or len(set(chunks[0].content) & set(chunks[1].content)) > 0
+
+
+def test_paragraph_boundary_split(chunker):
+    """段落优先：超长正文在段落边界断开，段落不切半。
+
+    两段（各 ~66 tokens）累积超 max=100 → 只在段落边界断开：
+    chunk0 只含段1，段2 完整进入后续 chunk，不出现半个段落。
+    """
+    sentence1 = "本项目建设内容包括基础网络、安全防护、数据平台与业务应用四大部分。"  # 33 tokens
+    sentence2 = "实施计划分三阶段推进，包含方案设计、系统开发与试运行验收环节。"  # 33 tokens
+    para1 = sentence1 * 2
+    para2 = sentence2 * 2
+    text = "第一章 建设方案\n" + para1 + "\n\n" + para2
+    chunks = chunker.chunk(text, bid_id="BID-1", lot_id="LOT-1")
+    assert len(chunks) >= 2
+    # 段1（含标题前缀）独立成 chunk0，段2 不进 chunk0（段落边界断开，不混切）
+    assert chunks[0].content == "第一章 建设方案\n" + para1
+    assert para2 not in chunks[0].content
+    # 每 chunk 内段落完整：按空行切出的每个单元都是完整段落（句子整块）
+    for c in chunks:
+        for seg in c.content.split("\n\n"):
+            assert seg == para1 or seg == para2 or seg == "第一章 建设方案\n" + para1
+
+
+def test_paragraph_overlap_tail(chunker):
+    """段落级 overlap：新 chunk 开头带上一 chunk 末尾段落尾部。
+
+    3 段累积超 max 断开后，中间段应同时出现在相邻两个 chunk（边界上下文连续）。
+    """
+    sentence1 = "本项目建设内容包括基础网络、安全防护、数据平台与业务应用四大部分。"
+    sentence2 = "实施计划分三阶段推进，包含方案设计、系统开发与试运行验收环节。"
+    sentence3 = "质量保证体系覆盖需求评审、过程审计与交付验收三道防线。"
+    para1 = sentence1 * 2  # 66 tokens
+    para2 = sentence2 * 2
+    para3 = sentence3 * 2
+    text = "第一章 建设方案\n" + para1 + "\n\n" + para2 + "\n\n" + para3
+    chunks = chunker.chunk(text, bid_id="BID-1", lot_id="LOT-1")
+    assert len(chunks) >= 2
+    contents = [c.content for c in chunks]
+    # overlap：相邻 chunk 共享某段落（末尾段尾部被带入新 chunk 开头）
+    shared = any(
+        para in contents[i] and para in contents[i + 1]
+        for i in range(len(contents) - 1)
+        for para in (para1, para2, para3)
+    )
+    assert shared, "相邻 chunk 应共享末尾段落（段落级 overlap）"
+
+
+def test_single_paragraph_window_fallback(chunker):
+    """单段超长（无段落信号）→ token 滑窗兜底（原逻辑保留）。
+
+    超长连续文本无空行/换行，段落切分不可用 → 滑窗按步长 max-overlap 切，
+    相邻窗口保留 overlap。
+    """
+    sentence = "本项目建设内容包括基础网络、安全防护、数据平台与业务应用四大部分。"
+    text = "第一章 建设方案\n" + sentence * 40  # ~1300 tokens，单段无换行
+    chunks = chunker.chunk(text, bid_id="BID-1", lot_id="LOT-1")
+    assert len(chunks) >= 2
+    for c in chunks:
+        assert len(c.content) > 0
+    # 设计不变量：标题作为该章首个 chunk 内容前缀，且不拆成独立近空 chunk
+    # （标题不参与滑窗切分——若标题混入正文被硬切，会出现 ~7 token 的标题-only chunk）
+    assert chunks[0].content.startswith("第一章 建设方案\n")
+    assert not any(c.content.strip() == "第一章 建设方案" for c in chunks)
+    # 滑窗 overlap：相邻窗口共享正文（字符重叠近似）
+    assert len(set(chunks[0].content) & set(chunks[1].content)) > 0
+
+
+def test_no_blank_line_newline_fallback(chunker):
+    """无空行退化为单换行切分（DOCX 每段一行的场景）。
+
+    DOCX 提取文本段间是单换行（非空行），段落信号退化为单换行，
+    段落仍为原子单元不切半。
+    """
+    sentence = "本项目建设内容包括基础网络、安全防护、数据平台与业务应用四大部分。"  # 33 tokens
+    text = "第一章 建设方案\n" + "\n".join([sentence] * 4)  # 正文 4 行无空行（132 tokens > max）
+    chunks = chunker.chunk(text, bid_id="BID-1", lot_id="LOT-1")
+    assert len(chunks) >= 1
+    for c in chunks:
+        # 单换行退化的段落不切半：每段都是完整句子
+        for seg in c.content.split("\n\n"):
+            assert seg in (sentence, "第一章 建设方案") or seg.startswith("第一章 建设方案")
 
 
 def test_chunk_id_sequence_global(chunker):
