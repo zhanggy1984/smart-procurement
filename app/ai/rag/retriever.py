@@ -107,8 +107,13 @@ def _score_keywords(chunks: list[dict], terms: list[str]) -> list[tuple[str, flo
     return scored
 
 
-def _search_vector(query_vec, lot_id: str, bid_id: str, top_k: int) -> list[tuple[str, float]]:
-    """路1：Milvus 向量检索。返回 [(chunk_id, score)]。"""
+def _search_vector(query_vec, lot_id: str, bid_id: str, top_k: int) -> list[tuple[str, float, dict]]:
+    """路1：Milvus 向量检索。返回 [(chunk_id, score, entity_meta)]。
+
+    entity_meta 自带 content/chapter_title/page_range 等溯源元数据——向量命中
+    组装不依赖 _query_all_chunks 全量拉取（自查 #5：该路失败/超限时向量命中
+    不被丢弃，语义检索成功不空手而归）。
+    """
     from app.core.milvus import get_collection
 
     collection = get_collection()
@@ -122,9 +127,27 @@ def _search_vector(query_vec, lot_id: str, bid_id: str, top_k: int) -> list[tupl
         param={"metric_type": "IP", "params": {"nprobe": 16}},
         limit=top_k,
         expr=expr,
-        output_fields=["chunk_id"],
+        output_fields=[
+            "chunk_id", "content", "chapter_title", "page_range",
+            "heading_level", "source_type", "token_count",
+        ],
     )[0]
-    return [(h.entity.get("chunk_id"), h.score) for h in hits]
+    return [
+        (
+            h.entity.get("chunk_id"),
+            h.score,
+            {
+                "chunk_id": h.entity.get("chunk_id"),
+                "content": h.entity.get("content"),
+                "chapter_title": h.entity.get("chapter_title"),
+                "page_range": h.entity.get("page_range"),
+                "heading_level": h.entity.get("heading_level"),
+                "source_type": h.entity.get("source_type"),
+                "token_count": h.entity.get("token_count"),
+            },
+        )
+        for h in hits
+    ]
 
 
 def _query_all_chunks(lot_id: str, bid_id: str, limit: int = _KEYWORD_SCAN_LIMIT) -> list[dict]:
@@ -208,14 +231,14 @@ async def _retrieve_internal(
             semantic_ok = False
             hits_v = []
             logger.warning("retriever.semantic_failed", lot_id=lot_id, bid_id=bid_id, error=str(e))
-    # 关键词路拉全量 chunk：Milvus query 挂也降级（结构化路仍可用）
+    # 关键词路拉全量 chunk：Milvus query 挂 → 仅关键词路素材缺失，结构化路仍可用。
+    # 不降级 semantic_ok（自查 #5）：路1 向量命中已自带元数据，query 失败不拖累向量路。
     try:
         all_chunks = await asyncio.wait_for(
             asyncio.to_thread(_query_all_chunks, lot_id, bid_id),
             timeout=SEMANTIC_TIMEOUT_SECONDS,
         )
     except Exception as e:  # noqa: BLE001  含 TimeoutError
-        semantic_ok = False
         all_chunks = []
         logger.warning("retriever.chunks_failed", lot_id=lot_id, bid_id=bid_id, error=str(e))
 
@@ -237,30 +260,32 @@ async def _retrieve_internal(
     hits_s = await _structured_match(query, bid_id)
 
     # RRF 融合（向量 + 关键词两路）
-    routes = {"vector": hits_v}
+    routes = {"vector": [(cid, s) for cid, s, _ in hits_v]}
     if hits_k:
         routes["keyword"] = hits_k
     fused = _rrf_fuse(routes, k=k_rrf, top_n=top_k)
 
+    # 组装：向量路自带元数据优先（自查 #5，不依赖全量拉取）；关键词路回退 chunk_info
+    vec_meta = {cid: meta for cid, _, meta in hits_v}
     chunk_info = {c["chunk_id"]: c for c in all_chunks}
     results: list[RetrievalResult] = []
     for cid, score in fused:
-        info = chunk_info.get(cid)
-        if info is None:
+        meta = vec_meta.get(cid) or chunk_info.get(cid)
+        if meta is None:
             continue
         results.append(
             RetrievalResult(
                 chunk_id=cid,
                 bid_id=bid_id,
                 lot_id=lot_id,
-                content=info["content"],
-                chapter_title=info.get("chapter_title") or "",
-                page_range=page_range_from_str(info.get("page_range")),
+                content=meta["content"] or "",
+                chapter_title=meta.get("chapter_title") or "",
+                page_range=page_range_from_str(meta.get("page_range")),
                 score=score,
-                source="vector" if cid in {c[0] for c in hits_v} else "keyword",
-                heading_level=info.get("heading_level") or 0,
-                source_type=info.get("source_type") or "paragraph",
-                token_count=info.get("token_count") or 0,
+                source="vector" if cid in vec_meta else "keyword",
+                heading_level=meta.get("heading_level") or 0,
+                source_type=meta.get("source_type") or "paragraph",
+                token_count=meta.get("token_count") or 0,
             )
         )
     # 结构化结果附加尾部（证据增强，非语义 chunk）

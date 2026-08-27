@@ -203,12 +203,16 @@ async def test_milvus_search_non_timeout_failure_degrades(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_query_all_chunks_failure_degrades_to_structured(monkeypatch):
-    """Milvus query 挂 → 关键词路也空，但结构化路仍出结果；hint=SEMANTIC_DOWN。"""
+    """Milvus 整体不可用（search + query 均挂）→ SEMANTIC_DOWN + 结构化路兜底。"""
     from app.ai.rag import retriever as R
     from app.ai.rag.degradation import DegradationHint
 
     monkeypatch.setattr(R, "get_embedder", lambda: _FakeEmbedder())
-    monkeypatch.setattr(R, "_search_vector", lambda *a, **kw: [])
+
+    def _raise(*a, **kw):
+        raise RuntimeError("milvus conn refused")
+
+    monkeypatch.setattr(R, "_search_vector", _raise)
     monkeypatch.setattr(R, "_query_all_chunks", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("milvus query down")))
 
     async def _one_structured(q, bid_id):
@@ -219,3 +223,37 @@ async def test_query_all_chunks_failure_degrades_to_structured(monkeypatch):
     assert hint == DegradationHint.SEMANTIC_DOWN
     assert len(results) == 1
     assert results[0].source == "structured"  # 结构化路兜底
+
+
+@pytest.mark.asyncio
+async def test_all_chunks_down_keeps_vector_hits(monkeypatch):
+    """Milvus query（全量拉取）挂，但向量检索成功 → 向量命中保留（自查 #5）。
+
+    原实现：all_chunks 失败 → chunk_info={} → 向量命中元数据缺失被整体丢弃，
+    语义检索明明成功却空手而归；且 query 失败还把 semantic_ok 置 False 污染置信信号。
+    """
+    from app.ai.rag import retriever as R
+
+    monkeypatch.setattr(R, "get_embedder", lambda: _FakeEmbedder())
+    monkeypatch.setattr(
+        R, "_search_vector",
+        lambda *a, **kw: [(
+            "c1", 0.85,
+            {"chunk_id": "c1", "content": "系统采用微服务架构，分层清晰",
+             "chapter_title": "技术方案", "page_range": "3",
+             "heading_level": 1, "source_type": "paragraph", "token_count": 12},
+        )],
+    )
+    monkeypatch.setattr(R, "_query_all_chunks", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("milvus query down")))
+    monkeypatch.setattr(R, "_structured_match", _empty_structured)
+    results, max_score, semantic_ok = await R._retrieve_internal(
+        "微服务架构", lot_id="L", bid_id="B"
+    )
+    # 向量命中不丢，且不被 query 失败降级
+    assert semantic_ok is True
+    assert max_score == 0.85
+    assert len(results) == 1
+    assert results[0].source == "vector"
+    assert results[0].content == "系统采用微服务架构，分层清晰"
+    assert results[0].chapter_title == "技术方案"
+    assert results[0].page_range == [3, 3]
