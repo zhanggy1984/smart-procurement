@@ -177,7 +177,7 @@ async def test_stream_score_tool_call_meta(monkeypatch):
 
     result = RetrievalResult(
         chunk_id="c1", bid_id="B1", lot_id="LOT-1",
-        content="标书技术方案：微服务架构，分层清晰", chapter_title="技术方案", page_no=3,
+        content="标书技术方案：微服务架构，分层清晰", chapter_title="技术方案", page_range=[3, 3],
         score=0.8, source="vector",
     )
     meta = {"source_count": 1, "max_score": 0.8, "semantic_ok": True, "confidence_band": "high"}
@@ -204,7 +204,18 @@ async def test_stream_score_tool_call_meta(monkeypatch):
     assert tool["confidence_band"] == "high"
     assert tool["semantic_ok"] is True
     assert tool["hint"] is None
-    assert tool["result"] == [{"chunk_id": "c1", "chapter_title": "技术方案", "score": 0.8}]
+    assert tool["result"] == [
+        {"chunk_id": "c1", "chapter_title": "技术方案", "page_range": [3, 3], "score": 0.8}
+    ]
+
+    # SSE source 事件（旧前端证据溯源）同样透出 page_range（additive，不破坏事件序）
+    src_ev = [fr for fr in frames if "\nevent: source\n" in fr]
+    assert src_ev, "应存在 source 事件"
+    src_data = json.loads(src_ev[0].split("\nevent: source\ndata: ")[1].split("\n\n")[0])
+    assert src_data["chunk_id"] == "c1"
+    assert src_data["chapter_title"] == "技术方案"
+    assert src_data["page_range"] == [3, 3]
+    assert src_data["content"]
 
 
 @pytest.mark.asyncio
@@ -228,7 +239,7 @@ async def test_stream_score_out_of_range_score_null_hint(monkeypatch):
 
     result = RetrievalResult(
         chunk_id="c1", bid_id="B1", lot_id="LOT-1",
-        content="标书技术方案", chapter_title="技术方案", page_no=3,
+        content="标书技术方案", chapter_title="技术方案", page_range=[3, 3],
         score=0.8, source="vector",
     )
     meta = {"source_count": 1, "max_score": 0.8, "semantic_ok": True, "confidence_band": "high"}

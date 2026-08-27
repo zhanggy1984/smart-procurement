@@ -105,12 +105,19 @@ def _check_docx_bomb(content: bytes) -> None:
 
 
 def _extract_text(content: bytes, kind: str) -> str:
-    """提取全文。PDF 按页拼合；DOCX 先过压缩炸弹防御再解析。"""
+    """提取全文。PDF 逐页提取并在页首插 `@@PAGE:n@@` 标记（P8.2，good-question
+    页码协议，chunker 据此解析 page_range）；DOCX 先过压缩炸弹防御再解析。
+    空白页（扫描件）跳过，无页码标记。"""
     if kind == "pdf":
         import pdfplumber
 
         with pdfplumber.open(io.BytesIO(content)) as pdf:
-            return "\n".join(page.extract_text() or "" for page in pdf.pages).strip()
+            parts = []
+            for i, page in enumerate(pdf.pages):
+                txt = page.extract_text() or ""
+                if txt.strip():
+                    parts.append(f"@@PAGE:{i + 1}@@\n{txt}")
+            return "\n".join(parts).strip()
     _check_docx_bomb(content)
     import docx as _docx
 
@@ -160,6 +167,7 @@ def _extract_structured_fields(text: str) -> dict:
 
 def _insert_milvus(chunks, embeddings: list[list[float]], bid_id: str) -> int:
     """批量入库。先按 bid_id 删旧 chunks（幂等）再插入，flush 后立即可检索。"""
+    from app.ai.rag.chunker import page_range_to_str
     from app.core.milvus import get_collection
 
     collection = get_collection()
@@ -175,9 +183,12 @@ def _insert_milvus(chunks, embeddings: list[list[float]], bid_id: str) -> int:
         [c.content for c in chunks],
         embeddings,
         [c.chapter_title for c in chunks],
-        [c.page_no for c in chunks],
+        [page_range_to_str(c.page_range) for c in chunks],
         [c.chunk_index for c in chunks],
         [c.source_file for c in chunks],
+        [c.heading_level for c in chunks],
+        [c.source_type for c in chunks],
+        [c.token_count for c in chunks],
     ]
     collection.insert(data)
     collection.flush()

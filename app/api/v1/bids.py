@@ -206,6 +206,8 @@ async def get_bid_content(
 
     Milvus 不可用/无 chunks 时降级返回空列表（前端展示降级提示，不影响评分主链路）。
     """
+    from app.ai.rag.chunker import page_range_from_str
+
     logger.debug("bid.content_request", operator=user.user_id, bid_id=bid_id)
     bid = await session.get(BidDocument, bid_id)
     if bid is None:
@@ -220,7 +222,7 @@ async def get_bid_content(
         collection.load()
         return collection.query(
             expr=f'lot_id == "{bid.lot_id}" && bid_id == "{bid.bid_id}"',
-            output_fields=["chunk_id", "content", "chapter_title", "chunk_index"],
+            output_fields=["chunk_id", "content", "chapter_title", "chunk_index", "page_range"],
             limit=1024,
         )
 
@@ -247,6 +249,7 @@ async def get_bid_content(
                 "chunk_id": c["chunk_id"],
                 "chapter_title": c.get("chapter_title", ""),
                 "chunk_index": c.get("chunk_index", 0),
+                "page_range": page_range_from_str(c.get("page_range")),
                 "content": c["content"],
             }
             for c in chunks

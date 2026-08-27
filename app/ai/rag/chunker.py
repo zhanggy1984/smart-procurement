@@ -11,6 +11,12 @@
   overlap（新 chunk 开头带上一 chunk 末尾段落尾部）。
 - 幂等/纯函数：chunk() 无副作用，同一输入输出完全一致（验收/单测可复现）。
 
+P8.2 元数据升级（参考 good-question）：页码协议 `@@PAGE:n@@` 行标记——
+  document_ingest 逐页提取 PDF 时插入标记，本分块器解析标记（更新当前页号、
+  剥离标记行不进正文），按标题 section 记录覆盖页码范围 page_range=[start,end]
+  （跨页 section 下所有 chunk 共享，无标记恒 [0,0]）。新增 heading_level /
+  source_type / token_count 溯源元数据。切分顺序与段落原子性不受影响。
+
 P2.2 单测覆盖：标题感知切分、段落边界断开、overlap 保留、超长截断、空文档。
 """
 
@@ -33,17 +39,82 @@ _HEADING_RE = re.compile(
     r")\s*[^\n]{0,40}?"
 )
 
+# 页码协议（good-question）：PDF 逐页提取时页首插 `@@PAGE:n@@` 行，n 从 1 起。
+# 分块器识别并剥离该行（不进正文），section 据此记录覆盖的页码范围。
+_PAGE_MARKER_RE = re.compile(r"^@@PAGE:(\d+)@@\s*$")
+
+
+def _page_range(pages: set[int]) -> list[int]:
+    """页码集合 → [start, end]；空集（无标记）→ [0, 0]。"""
+    return [min(pages), max(pages)] if pages else [0, 0]
+
+
+def page_range_to_str(r: list[int]) -> str:
+    """page_range → Milvus VARCHAR：单页 "1"、跨页 "1-2"、无页码 "0"。"""
+    if not r or len(r) < 2 or r[1] <= 0:
+        return "0"
+    return str(r[0]) if r[0] == r[1] else f"{r[0]}-{r[1]}"
+
+
+def page_range_from_str(s: str) -> list[int]:
+    """Milvus VARCHAR → page_range：[1,1] 单页 / [1,2] 跨页 / [0,0] 无页码。"""
+    if not s or s == "0":
+        return [0, 0]
+    if "-" in s:
+        a, b = s.split("-", 1)
+        return [int(a), int(b)]
+    n = int(s)
+    return [n, n]
+
+
+def _heading_level(title: str) -> int:
+    """标题层级（0=无标题）。映射 _HEADING_RE 各格式：章/篇/附录=1，数字小节
+    按点分段数 2/3/4，一、=2，（一）=3。近似反映格式层级，非文档实际层级树。"""
+    t = (title or "").strip()
+    if not t:
+        return 0
+    if t.startswith(("第", "附录")):
+        return 1
+    m = re.match(r"^[0-9]+(?:\.[0-9]+){0,2}", t)
+    if m:
+        return 2 + m.group(0).count(".")
+    if t.startswith("（"):
+        return 3
+    return 2  # 一、等中文序号及兜底
+
+
+def _infer_source_type(content: str) -> str:
+    """内容类型推断（参考 good-question）：table/list/code/paragraph。"""
+    lines = [l for l in content.splitlines() if l.strip()]
+    if not lines:
+        return "paragraph"
+    n = len(lines)
+    if sum(1 for l in lines if "|" in l or "\t" in l) / n >= 0.4:
+        return "table"
+    if sum(1 for l in lines if re.match(r"^\s*[-*•·]\s|\d+[.、]\s", l)) / n >= 0.5:
+        return "list"
+    if sum(1 for l in lines if re.match(r"^\s{2,}", l) and any(c in l for c in "{}[]();=<>#")) / n >= 0.5:
+        return "code"
+    return "paragraph"
+
 
 @dataclass
 class DocumentChunk:
-    """单个分块。字段对齐 Milvus `bid_documents` schema（scripts/init_milvus.py）。"""
+    """单个分块。字段对齐 Milvus `bid_documents` schema（scripts/init_milvus.py）。
+
+    P8.2 元数据升级（参考 good-question）：page_range 页码范围（原 page_no 单值
+    表达不了跨页 chunk）、heading_level/source_type/token_count 溯源元数据。
+    """
 
     chunk_id: str  # f"{bid_id}-{seq:04d}"
     bid_id: str
     lot_id: str
     content: str
     chapter_title: str
-    page_no: int
+    page_range: list[int]  # [start,end] 页码范围（good-question @@PAGE:n@@ 协议；无标记 [0,0]）
+    heading_level: int  # 标题层级（0=无标题，1=章/篇/附录，2=节/一、，3=（一））
+    source_type: str  # table/list/code/paragraph（参考 good-question）
+    token_count: int  # tiktoken cl100k 统计
     chunk_index: int
     source_file: str
     embedding: list[float] = field(default_factory=list)  # P2.1 Step 4 填充
@@ -86,12 +157,13 @@ class SmartDocumentChunker:
         bid_id: str,
         lot_id: str,
         source_file: str = "",
-        page_no: int = 0,
     ) -> list[DocumentChunk]:
         """把全文切成 DocumentChunk 列表（标题感知 + 段落优先 + 段落级 overlap）。
 
         返回空列表：空文档/全空白。chunk_index 全局递增，chunk_id 取
         `{bid_id}-{seq:04d}`，保证 Milvus 主键唯一且可复现。
+        页码：文本内 `@@PAGE:n@@` 标记（good-question 协议）由 _split_by_headings
+        解析，section 级 page_range 复制给该 section 下所有 chunk。
         """
         if not text or not text.strip():
             return []
@@ -99,7 +171,7 @@ class SmartDocumentChunker:
         sections = self._split_by_headings(text)
         chunks: list[DocumentChunk] = []
         seq = 0
-        for title, body in sections:
+        for title, body, page_range in sections:
             full = f"{title}\n{body}" if title else body
             # 短文档（含标题 ≤ max）整体保留：标题并入正文首行，chunk 自包含。
             # 超长正文：段落切分纯 body，标题只作为该章首个 chunk 内容前缀——
@@ -110,6 +182,7 @@ class SmartDocumentChunker:
                 pieces = self._split_body(body)
                 if title and pieces:
                     pieces[0] = f"{title}\n{pieces[0]}"
+            heading_level = _heading_level(title)
             for piece in pieces:
                 chunks.append(
                     DocumentChunk(
@@ -118,7 +191,10 @@ class SmartDocumentChunker:
                         lot_id=lot_id,
                         content=piece,
                         chapter_title=title or "无标题",
-                        page_no=page_no,
+                        page_range=page_range,
+                        heading_level=heading_level,
+                        source_type=_infer_source_type(piece),
+                        token_count=len(self.encoder.encode(piece)),
                         chunk_index=seq,
                         source_file=source_file,
                     )
@@ -129,26 +205,38 @@ class SmartDocumentChunker:
     # ==================== 内部实现 ====================
 
     @staticmethod
-    def _split_by_headings(text: str) -> list[tuple[str, str]]:
-        """按标题行把全文分成 (标题, 正文) 列表。
+    def _split_by_headings(text: str) -> list[tuple[str, str, list[int]]]:
+        """按标题行把全文分成 (标题, 正文, 页码范围) 列表。
 
         无标题的正文归入"无标题"段（标题为空字符串，调用方映射为"无标题"）。
         标题行本身并入该段正文（见 chunk() 的 full 拼接），故此处只返回标题名。
+        页码协议（P8.2，good-question）：`@@PAGE:n@@` 行标记更新当前页号、
+        不进入正文；section 记录覆盖的页码范围（无标记恒 [0,0]），跨页 section
+        的正文页随标记扩展。
         """
-        sections: list[tuple[str, list[str]]] = []
+        sections: list[tuple[str, list[str], list[int]]] = []
         cur_title = ""
         cur_lines: list[str] = []
+        cur_pages: set[int] = set()  # 当前 section 覆盖的页
+        current_page = 0
         for line in text.splitlines():
+            pm = _PAGE_MARKER_RE.match(line.strip())
+            if pm:  # 页标记行：仅更新当前页号，不进入任何 section 正文
+                current_page = int(pm.group(1))
+                continue
             if _HEADING_RE.match(line):
                 if cur_lines or cur_title:
-                    sections.append((cur_title, "\n".join(cur_lines)))
+                    sections.append((cur_title, "\n".join(cur_lines), _page_range(cur_pages)))
                 cur_title = line.strip()
                 cur_lines = []
+                cur_pages = {current_page} if current_page else set()
             else:
                 cur_lines.append(line)
+                if current_page:
+                    cur_pages.add(current_page)
         if cur_lines or cur_title:
-            sections.append((cur_title, "\n".join(cur_lines)))
-        return [(t, b) for t, b in sections if b.strip()]
+            sections.append((cur_title, "\n".join(cur_lines), _page_range(cur_pages)))
+        return [(t, b, p) for t, b, p in sections if b.strip()]
 
     def _split_body(self, body: str) -> list[str]:
         """把一段超长正文切成 [min, max] 的 chunk 列表（段落优先，P7.x）。

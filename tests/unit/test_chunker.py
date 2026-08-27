@@ -163,3 +163,105 @@ def test_illegal_params_raises():
         SmartDocumentChunker(min_tokens=100, max_tokens=100, overlap_tokens=0)
     with pytest.raises(ValueError):
         SmartDocumentChunker(min_tokens=0, max_tokens=50, overlap_tokens=10)
+
+
+# ==================== P8.2 页码协议 + 溯源元数据 ====================
+
+
+def test_page_marker_single_page(chunker):
+    """单页标记：section 落在单页 → page_range=[n,n]，标记行剥离不进正文。"""
+    text = "@@PAGE:1@@\n第一章 概况\n公司简介与项目背景。"
+    chunks = chunker.chunk(text, bid_id="BID-1", lot_id="LOT-1")
+    assert len(chunks) == 1
+    assert chunks[0].page_range == [1, 1]
+    assert "@@PAGE" not in chunks[0].content
+
+
+def test_page_marker_cross_page_section(chunker):
+    """跨页 section：页标记更新当前页，section 覆盖 [1,2]（section 级共享）。"""
+    text = (
+        "@@PAGE:1@@\n第一章 建设方案\n第一页方案要点。\n"
+        "@@PAGE:2@@\n第二章 延续说明\n第二页详细设计。"
+    )
+    chunks = chunker.chunk(text, bid_id="BID-1", lot_id="LOT-1")
+    pages = [(c.chapter_title, c.page_range) for c in chunks]
+    assert ("第一章 建设方案", [1, 1]) in pages
+    assert ("第二章 延续说明", [2, 2]) in pages
+
+
+def test_page_range_cross_page_same_section(chunker):
+    """同一 section 横跨两页：page_range=[1,2] 复制给该 section 下所有 chunk。"""
+    text = (
+        "@@PAGE:1@@\n第一章 建设方案\n第一页内容。\n"
+        "@@PAGE:2@@\n第二页延续（仍属第一章）。"
+    )
+    chunks = chunker.chunk(text, bid_id="BID-1", lot_id="LOT-1")
+    assert len(chunks) >= 1
+    for c in chunks:
+        assert c.page_range == [1, 2]
+
+
+def test_no_marker_page_zero(chunker):
+    """无页码标记（DOCX/MD/TXT）：恒 [0,0]。"""
+    chunks = chunker.chunk("第一章 概况\n公司简介与项目背景。", bid_id="BID-1", lot_id="LOT-1")
+    assert chunks[0].page_range == [0, 0]
+
+
+def test_page_markers_do_not_change_split_order(chunker):
+    """页码标记剥离不进正文：切分顺序与 chunk_id 序列不受标记影响（基准 chunk_id 稳定）。"""
+    base = "第一章 概况\n公司简介与项目背景。\n第二章 详情\n技术方案说明。"
+    marked = (
+        "@@PAGE:1@@\n第一章 概况\n公司简介与项目背景。\n"
+        "@@PAGE:2@@\n第二章 详情\n技术方案说明。"
+    )
+    c_base = chunker.chunk(base, bid_id="BID-1", lot_id="LOT-1")
+    c_marked = chunker.chunk(marked, bid_id="BID-1", lot_id="LOT-1")
+    assert [c.content for c in c_base] == [c.content for c in c_marked]
+    assert _ids(c_base) == _ids(c_marked)
+
+
+def test_heading_level_infer(chunker):
+    """标题层级：章/篇/附录=1、数字小节按点 2/3/4、一、=2、（一）=3、无标题=0。"""
+    text = (
+        "独立段落无标题。\n"
+        "第一章 概况\n内容 A。\n"
+        "3.2 架构\n内容 B。\n"
+        "3.2.1 模块划分\n内容 C。\n"
+        "一、团队\n内容 D。\n"
+        "（一）分工\n内容 E。\n"
+        "附录A\n内容 F。"
+    )
+    chunks = chunker.chunk(text, bid_id="BID-1", lot_id="LOT-1")
+    level = {c.chapter_title: c.heading_level for c in chunks}
+    assert level["第一章 概况"] == 1
+    assert level["3.2 架构"] == 3  # 2 + 点数(1)
+    assert level["3.2.1 模块划分"] == 4  # 2 + 点数(2)
+    assert level["一、团队"] == 2
+    assert level["（一）分工"] == 3
+    assert level["附录A"] == 1
+    assert level["无标题"] == 0
+
+
+def test_source_type_infer(chunker):
+    """内容类型推断：table/list/code/paragraph（参考 good-question）。"""
+    assert chunker.chunk("第一章 表\n品名 | 数量 | 单价\nA | 1 | 2\nB | 3 | 4",
+                         bid_id="B", lot_id="L")[0].source_type == "table"
+    assert chunker.chunk("第一章 列表\n- 需求一\n- 需求二\n- 需求三",
+                         bid_id="B", lot_id="L")[0].source_type == "list"
+    assert chunker.chunk("第一章 代码\n    def f():\n        return 1\n    def g():",
+                         bid_id="B", lot_id="L")[0].source_type == "code"
+    assert chunker.chunk("第一章 正文\n这是一段普通的说明文字。",
+                         bid_id="B", lot_id="L")[0].source_type == "paragraph"
+
+
+def test_page_range_str_roundtrip():
+    """page_range ↔ VARCHAR 往返：单页 "1" / 跨页 "1-2" / 无页码 "0"。"""
+    from app.ai.rag.chunker import page_range_from_str, page_range_to_str
+
+    assert page_range_to_str([1, 1]) == "1"
+    assert page_range_to_str([1, 2]) == "1-2"
+    assert page_range_to_str([0, 0]) == "0"
+    assert page_range_from_str("1") == [1, 1]
+    assert page_range_from_str("1-2") == [1, 2]
+    assert page_range_from_str("0") == [0, 0]
+    assert page_range_from_str("") == [0, 0]

@@ -94,7 +94,7 @@ async def test_retrieve_knowledge_hit(monkeypatch):
 
     result = RetrievalResult(
         chunk_id="c1", bid_id="B1", lot_id="LOT-1",
-        content="标书技术方案：微服务架构", chapter_title="技术方案", page_no=3,
+        content="标书技术方案：微服务架构", chapter_title="技术方案", page_range=[3, 3],
         score=0.8, source="vector",
     )
     meta = {"max_score": 0.8, "semantic_ok": True, "source_count": 1, "confidence_band": "high"}

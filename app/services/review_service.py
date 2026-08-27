@@ -224,17 +224,19 @@ async def stream_score(
     )
 
     # 检索结果 → source 事件（证据溯源，旧前端）+ 契约 tool_call（评测端观测检索动作）
+    # P8.2：透出 page_range 页码范围（溯源面板"第 N 页/第 A-B 页"），加字段 additive 契约兼容
     retrievals: list[dict] = []
     for r in results:
         if r.source in ("vector", "keyword"):
             retrievals.append({
                 "chunk_id": r.chunk_id, "chapter_title": r.chapter_title,
-                "score": round(r.score, 4),
+                "page_range": r.page_range, "score": round(r.score, 4),
             })
             yield sse_event(
                 "source",
                 {"chunk_id": r.chunk_id, "content": r.content[:500],
-                 "chapter_title": r.chapter_title, "score": round(r.score, 4)},
+                 "chapter_title": r.chapter_title, "page_range": r.page_range,
+                 "score": round(r.score, 4)},
                 seq := seq + 1,
             )
     yield sse_event("tool_call", {

@@ -66,3 +66,23 @@ async def test_bid_content_milvus_degraded_to_empty(client, admin_headers, sup_h
     assert resp.status_code == 200
     assert resp.json()["chunks"] == []
     assert resp.json()["bid_id"] == bid_id
+
+
+@pytest.mark.asyncio
+async def test_bid_content_page_range_transparent(client, admin_headers, sup_headers, lot_factory):
+    """get_bid_content 正常路径：chunks 透出 page_range（Milvus VARCHAR → list[int]）。"""
+    lot = await lot_factory()
+    up = await client.post(f"/api/v1/lots/{lot['lot_id']}/bids", headers=sup_headers,
+                           files={"file": ("b.pdf", b"%PDF-1.4\n%%itest", "application/pdf")})
+    assert up.status_code == 201
+    bid_id = up.json()["bid_id"]
+
+    fake = MagicMock()
+    fake.query.return_value = [
+        {"chunk_id": f"{bid_id}-0000", "content": "第一章内容", "chapter_title": "第一章",
+         "chunk_index": 0, "page_range": "2-3"},
+    ]
+    with patch("app.core.milvus.get_collection", return_value=fake):
+        resp = await client.get(f"/api/v1/bids/{bid_id}/content", headers=admin_headers)
+    assert resp.status_code == 200
+    assert resp.json()["chunks"][0]["page_range"] == [2, 3]

@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 import structlog
 from sqlalchemy import select
 
+from app.ai.rag.chunker import page_range_from_str
 from app.ai.rag.degradation import (
     CONFIDENCE_HIGH_THRESHOLD,
     CONFIDENCE_LOW_THRESHOLD,
@@ -58,16 +59,24 @@ _STOPWORDS = {
 
 @dataclass
 class RetrievalResult:
-    """单条检索结果（证据溯源用）。score 为 RRF 融合分数。"""
+    """单条检索结果（证据溯源用）。score 为 RRF 融合分数。
+
+    P8.2 元数据升级（参考 good-question）：page_no → page_range（[start,end]
+    页码范围，Mikvus VARCHAR 解析回），补 heading_level/source_type/token_count
+    溯源元数据。
+    """
 
     chunk_id: str
     bid_id: str
     lot_id: str
     content: str
     chapter_title: str
-    page_no: int
+    page_range: list[int]  # [start,end] 页码范围（结构化伪 chunk [0,0]）
     score: float
     source: str  # vector / keyword / structured
+    heading_level: int = 0
+    source_type: str = "paragraph"
+    token_count: int = 0
 
 
 def _keyword_terms(dimension: ScoringDimension, criteria: list[ScoringCriterion]) -> list[str]:
@@ -126,7 +135,10 @@ def _query_all_chunks(lot_id: str, bid_id: str, limit: int = _KEYWORD_SCAN_LIMIT
     collection.load()
     return collection.query(
         expr=f'lot_id == "{lot_id}" && bid_id == "{bid_id}"',
-        output_fields=["chunk_id", "content", "chapter_title", "page_no"],
+        output_fields=[
+            "chunk_id", "content", "chapter_title", "page_range",
+            "heading_level", "source_type", "token_count",
+        ],
         limit=limit,
     )
 
@@ -243,9 +255,12 @@ async def _retrieve_internal(
                 lot_id=lot_id,
                 content=info["content"],
                 chapter_title=info.get("chapter_title") or "",
-                page_no=info.get("page_no") or 0,
+                page_range=page_range_from_str(info.get("page_range")),
                 score=score,
                 source="vector" if cid in {c[0] for c in hits_v} else "keyword",
+                heading_level=info.get("heading_level") or 0,
+                source_type=info.get("source_type") or "paragraph",
+                token_count=info.get("token_count") or 0,
             )
         )
     # 结构化结果附加尾部（证据增强，非语义 chunk）
@@ -257,7 +272,7 @@ async def _retrieve_internal(
                 lot_id=lot_id,
                 content=f"[结构化数据] {marker}",
                 chapter_title="structured_data",
-                page_no=0,
+                page_range=[0, 0],
                 score=s,
                 source="structured",
             )

@@ -49,7 +49,10 @@
             </div>
             <div v-if="content.chunks.length" class="chunk-list">
               <div v-for="c in content.chunks" :key="c.chunk_id" class="chunk-item">
-                <div class="chunk-head">{{ c.chapter_title }}</div>
+                <div class="chunk-head">
+                  {{ c.chapter_title }}
+                  <span v-if="fmtPages(c.page_range)" class="cite-pages">{{ fmtPages(c.page_range) }}</span>
+                </div>
                 <div class="chunk-text">{{ c.content }}</div>
               </div>
             </div>
@@ -161,7 +164,10 @@
         <div class="right-scroll">
           <div v-if="citations.length" class="cite-list">
             <div v-for="(cit, i) in citations" :key="i" class="cite-item">
-              <div class="cite-head">引用「{{ cit.chapter_title }}」</div>
+              <div class="cite-head">
+                引用「{{ cit.chapter_title }}」
+                <span v-if="fmtPages(cit.page_range)" class="cite-pages">{{ fmtPages(cit.page_range) }}</span>
+              </div>
               <div class="cite-text">{{ cit.content }}</div>
             </div>
           </div>
@@ -230,6 +236,12 @@ const submitting = ref(false)
 function fmtWan(v) {
   if (v == null) return '-'
   return (Number(v) / 10000).toLocaleString('zh-CN', { maximumFractionDigits: 2 })
+}
+
+// 页码格式化（P8.2）：[n,n] 单页「第 n 页」、[a,b] 跨页「第 a-b 页」、[0,0] 无页码返回空串
+function fmtPages(r) {
+  if (!Array.isArray(r) || r.length < 2 || r[1] <= 0) return ''
+  return r[0] === r[1] ? `第 ${r[0]} 页` : `第 ${r[0]}-${r[1]} 页`
 }
 
 async function ensureReview() {
@@ -312,7 +324,11 @@ function handleScoreEvent(f) {
   } else if (f.event === 'source') {
     // 右侧证据溯源：收集引用原文
     if (f.data.content) {
-      citations.value.push({ chapter_title: f.data.chapter_title || '', content: f.data.content })
+      citations.value.push({
+        chapter_title: f.data.chapter_title || '',
+        content: f.data.content,
+        page_range: f.data.page_range || [0, 0],
+      })
     }
   } else if (f.event === 'thinking') {
     const stage = f.data.stage
@@ -763,6 +779,12 @@ onUnmounted(stopAiPolling)
   font-weight: 600;
   color: var(--el-color-warning-dark-2);
   margin-bottom: 3px;
+}
+.cite-pages {
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--el-text-color-secondary);
 }
 .cite-text {
   font-size: 12px;

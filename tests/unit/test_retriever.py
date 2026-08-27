@@ -101,7 +101,7 @@ async def test_retrieve_with_meta_return_meta(monkeypatch):
 
     result = RetrievalResult(
         chunk_id="c1", bid_id="B", lot_id="L", content="内容",
-        chapter_title="章", page_no=1, score=0.5, source="vector",
+        chapter_title="章", page_range=[1, 1], score=0.5, source="vector",
     )
 
     async def fake_internal(query, **kwargs):
@@ -154,7 +154,7 @@ class _FakeEmbedder:
 
 def _fake_chunks(lot_id, bid_id):
     return [
-        {"chunk_id": "c1", "content": "系统采用微服务架构，分层清晰", "chapter_title": "章", "page_no": 1},
+        {"chunk_id": "c1", "content": "系统采用微服务架构，分层清晰", "chapter_title": "章", "page_range": "1"},
     ]
 
 
