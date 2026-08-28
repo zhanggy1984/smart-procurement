@@ -18,6 +18,7 @@ from app.api import contracts
 from app.api.v1 import api_v1_router
 from app.core import database, logging, milvus, neo4j
 from app.core.config import settings
+from app.core.crypto import is_fernet_key_secure
 from app.core.errors import is_dependency_error
 from app.core.middleware import RequestIDMiddleware
 from app.services import config_service
@@ -89,6 +90,12 @@ async def lifespan(app: FastAPI):
     if not _jwt_secret_secure(settings.jwt_secret_key):
         print("[startup] JWT_SECRET_KEY 缺失/为默认值/过短（须 ≥32 随机字符），拒绝启动",
               file=sys.stderr)
+        sys.exit(1)
+    # FERNET 密钥校验（fail loud）：空/非法拒绝启动，防随机 key 重启后历史加密数据不可解密
+    # （开发/演示显式 FERNET_KEY=auto 豁免）
+    if not is_fernet_key_secure(settings.fernet_key):
+        print("[startup] FERNET_KEY 缺失/非法（须为 32 url-safe base64，开发可显式填 auto），"
+              "拒绝启动：历史加密数据将不可解密", file=sys.stderr)
         sys.exit(1)
     checks = await asyncio.gather(*[_check_dependency(n) for n in HARD_DEPENDENCIES])
     failed = [n for n, ok in zip(HARD_DEPENDENCIES, checks) if not ok]
