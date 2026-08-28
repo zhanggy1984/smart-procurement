@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.bid_document import BidDocument, BidStatus
 from app.models.expert import Expert
 from app.models.expert_conflict_declaration import ExpertConflictDeclaration
-from app.models.expert_review import ExpertReview, ReviewStatus
+from app.models.expert_review import ExpertReview
 from app.models.lot_expert_assignment import AssignmentStatus, LotExpertAssignment
 from app.models.project import Lot, Project, ScoringDimension
 from app.models.supplier import Supplier

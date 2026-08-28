@@ -13,7 +13,7 @@ import pytest
 
 from conftest import BASE_URL, login, _sql
 from helpers import (create_project_full, expert_username, import_experts,
-                     import_suppliers, supplier_username, upload_bids, wait_parsed)
+                     import_suppliers, upload_bids, wait_parsed)
 
 EXPERT_ROWS = [
     {"expert_id": "E2E-EXP1", "name": "E2E专家甲", "region": "西北", "exp": 15, "tags": ["软件开发"]},

@@ -52,8 +52,7 @@ def test_risk_level_boundaries():
 
 def test_faiss_similar_pairs():
     """FAISS 批量：高相似段落对命中 + 低相似不命中。"""
-    n = pytest.importorskip("numpy")
-    from app.services.fraud_detection_service import TEXT_SIMILARITY_THRESHOLD
+    pytest.importorskip("numpy")
 
     v = [1.0] + [0.0] * 10
     chunks = [

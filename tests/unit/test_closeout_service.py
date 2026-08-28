@@ -14,7 +14,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.models.bid_document import BidStatus
 from app.models.expert_review import ReviewStatus
 from app.services.closeout_service import (
     LotNotFoundError,

@@ -12,8 +12,7 @@ import pytest
 
 from conftest import BASE_URL, login, _sql
 from helpers import (create_project_full, expert_username, import_conflicts,
-                     import_experts, import_suppliers, supplier_username,
-                     upload_bids, wait_parsed, neo4j_run, lot_status)
+                     import_experts, import_suppliers, upload_bids, wait_parsed, lot_status)
 
 EXP_A, EXP_B = "E2E-EXP-A", "E2E-EXP-B"
 EXPERT_ROWS = [

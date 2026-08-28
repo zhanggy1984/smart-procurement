@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 # 关闭真实 LLM 调用（单元测试不发起网络请求；断路器/重试单独构造测试）
 pytest_plugins = []

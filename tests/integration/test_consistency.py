@@ -13,7 +13,6 @@ from __future__ import annotations
 import io
 from datetime import datetime, timezone
 from io import BytesIO
-from unittest.mock import patch
 
 import openpyxl
 import pytest

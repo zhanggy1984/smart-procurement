@@ -13,7 +13,6 @@ MySQL 使用独立 test schema（smart_procurement_test，根 conftest 已切换
 
 from __future__ import annotations
 
-import asyncio
 import os
 import subprocess
 import sys
@@ -217,7 +216,6 @@ async def _reset_state():
     连接跨测试复用可能损坏（'Event loop is closed'）。每个测试前重置单例，
     模拟"每测试全新连接"，避免前序测试遗留连接污染。
     """
-    import app.api.v1.reviews as reviews_mod
     import app.core.redis as redis_core
     import app.tasks.dispatch as dispatch_mod
 

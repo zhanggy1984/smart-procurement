@@ -26,7 +26,6 @@ def mock_session():
 @pytest.mark.asyncio
 async def test_send(mock_session):
     """send 写入通知并 commit。"""
-    note = MagicMock()
     mock_session.add.return_value = None
     mock_session.refresh.return_value = None
     # 让 send 返回真实对象比较困难，直接断言 add 被调用

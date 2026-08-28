@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import structlog
 from sqlalchemy import select

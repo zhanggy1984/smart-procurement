@@ -12,7 +12,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.models.project import Lot, Project
 from app.services.expert_match_service import (
     LotNotFoundError,
     LotNotUnderReviewError,

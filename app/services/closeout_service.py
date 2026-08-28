@@ -22,7 +22,6 @@ from app.models.bid_document import BidDocument, BidStatus
 from app.models.expert_review import ExpertReview, ReviewStatus
 from app.models.project import Lot, Project, ScoringDimension
 from app.models.supplier import Supplier
-from app.services import review_service
 
 logger = structlog.get_logger(__name__)
 

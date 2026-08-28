@@ -111,7 +111,7 @@ async def test_update_status_blacklists_and_disables_login():
     user.is_active = True
     session.get.side_effect = [expert, user]
     with patch("app.services.expert_service.neo4j_sync.upsert_expert", new=AsyncMock()):
-        done = await update_status(session, "EXP-1", "BLACKLISTED", operator_id="U-1")
+        await update_status(session, "EXP-1", "BLACKLISTED", operator_id="U-1")
     assert expert.status == "BLACKLISTED"
     assert user.is_active is False
     session.commit.assert_awaited_once()
