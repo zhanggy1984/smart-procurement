@@ -5,10 +5,11 @@
 #   并发：同分支新提交取消在跑任务（cancel-in-progress），省 CI 分钟
 #
 # 分层（各层独立 job，L1 依赖 L0 全绿才跑）：
-#   L0 lint  —— ruff F 类（pyflakes：未定义名/未用 import/未用变量），秒级
+#   L0 lint  —— ruff F 类（pyflakes：未定义名/未用 import/未用变量），
+#               scope=app+tests+scripts（2026-08-28 scripts 纳入），秒级
 #   L0 build —— 前端 npm build，独立维度
 #   L1 unit  —— pytest tests/unit -m "not external"（离线，无外部服务依赖，
-#               327 用例全 mock 隔离，CI 不需要 MySQL/Redis/Milvus/Neo4j）
+#               全 mock 隔离，CI 不需要 MySQL/Redis/Milvus/Neo4j）
 #   L2 全量 —— 依赖真实中间件 + 外部 key（Neo4j/Milvus/BGE-M3/DeepSeek），
 #               本地 Docker 手动跑（tests/integration + e2e），CI 不自动执行
 #
@@ -51,7 +52,7 @@ jobs:
           poetry install -E dev
 
       - name: ruff F 类静态检查
-        run: poetry run ruff check app tests --select F
+        run: poetry run ruff check app tests scripts --select F
 
   # ==================== L0：前端构建 ====================
   l0-build:
