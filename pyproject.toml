@@ -85,6 +85,12 @@ ignore = ["E501"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# external：依赖真实外部服务（Neo4j/Milvus/BGE-M3/MinIO/真实 MySQL）的测试。
+# CI 门禁 L1 层用 `pytest -m "not external"` 过滤，保证无外部服务时全绿；
+# L2 全量层不带 -m 跑全部（含 external）。
+markers = [
+    "external: 依赖真实外部服务，CI L1 门禁跳过（L2 全量层执行）",
+]
 # 集成测试（tests/integration）通过 conftest 的 pytest_collection_modifyitems
 # 统一标记 session loop_scope（pytest-asyncio 0.24 仅支持 fixture_loop_scope
 # ini 项，测试函数 loop 需 hook 控制）。

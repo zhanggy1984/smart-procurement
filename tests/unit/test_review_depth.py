@@ -20,7 +20,6 @@ from app.models.bid_document import BidStatus
 from app.models.expert_review import ReviewStatus
 from app.services.review_service import (
     PRICE_DIMENSION_NAME,
-    BidNotFrozenError,
     ReviewAccessDeniedError,
     ReviewLockedError,
     ReviewNotFoundError,

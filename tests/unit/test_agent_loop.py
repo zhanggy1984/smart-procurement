@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import app.ai.agent.agent_loop as agent
 import app.ai.llm.deepseek_client as dc

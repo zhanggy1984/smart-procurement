@@ -13,7 +13,6 @@ from app.ai.rag.retriever import (
     _confidence_band,
     _rrf_fuse,
     _score_keywords,
-    retrieve_with_meta,
 )
 
 

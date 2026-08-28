@@ -21,13 +21,12 @@ import asyncio
 import json
 import sys
 import time
-from pathlib import Path
 
 from arq import create_pool
 from arq.connections import RedisSettings
 from neo4j import GraphDatabase
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -58,7 +57,7 @@ def neo4j_count(expert_id: str) -> int:
             return session.run("MATCH (e:Expert {expertId:$id}) RETURN count(e)", id=expert_id).single()[0]
 
 
-async def db() -> "AsyncEngine":
+async def db() -> AsyncEngine:
     return create_async_engine(settings.database_url)
 
 
@@ -97,7 +96,6 @@ async def enqueue_until(engine, task: str, aggregate_id: str, want: str, timeout
 
 async def cleanup(engine, driver) -> None:
     """清验收残留（幂等）：expert + outbox + Neo4j 节点。"""
-    ids = ("EXP-ACC16", "EXP-ACC17", "EXP-DIAG")
     async with engine.begin() as conn:
         await conn.execute(text("DELETE FROM outbox_event WHERE aggregate_id IN ('EXP-ACC16','EXP-ACC17','EXP-DIAG')"))
         await conn.execute(text("DELETE FROM expert WHERE expert_id IN ('EXP-ACC16','EXP-ACC17','EXP-DIAG')"))

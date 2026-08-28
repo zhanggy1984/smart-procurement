@@ -11,14 +11,11 @@
 from __future__ import annotations
 
 import io
-import os
-import re
 import secrets
-from pathlib import Path
 
 import openpyxl
 
-from conftest import PASSWORD, PREFIX, _sql, BASE_URL
+from conftest import _sql
 
 EXPERT_HEADERS = ["编号", "姓名", "单位", "地区", "从业年限", "专业标签", "身份证号", "邮箱", "电话"]
 SUPPLIER_HEADERS = ["编号", "企业名称", "统一社会信用代码", "法定代表人", "所属行业", "企业规模"]

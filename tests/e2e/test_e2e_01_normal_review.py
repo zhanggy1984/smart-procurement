@@ -11,17 +11,15 @@
 from __future__ import annotations
 
 import os
-import time
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from conftest import BASE_URL, PASSWORD, login, _sql
-from helpers import (create_project_full, expert_name, expert_username,
-                     import_experts, import_suppliers, make_bid_pdf,
-                     make_expert_excel, make_supplier_excel, supplier_name,
-                     supplier_username, upload_bids, wait_parsed, lot_status,
-                     award_bid, review_of)
+from conftest import BASE_URL, login, _sql
+from helpers import (expert_username,
+                     make_bid_pdf,
+                     make_expert_excel, make_supplier_excel, supplier_username, upload_bids, wait_parsed, lot_status,
+                     award_bid)
 
 EXPERT_ROWS = [
     # 地区用「西北」：合成演示数据（非 E2E- 前缀，cleanup 不删）在西北的 ACTIVE 专家
@@ -203,7 +201,6 @@ def ui_check_result(page, sup_username: str) -> str:
 
 @pytest.mark.e2e
 def test_e2e_01_normal_review(page, admin_api, pm_api):
-    import re
 
     # ---- 1. 管理员 UI 导入专家 + 供应商（覆盖导入页） ----
     ui_import(page, "/admin/experts", make_expert_excel(EXPERT_ROWS), "e2e_exp.xlsx")

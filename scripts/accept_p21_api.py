@@ -27,7 +27,7 @@ import zipfile
 import httpx
 from neo4j import GraphDatabase
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 # Windows 控制台 GBK 下中文输出乱码，强制 UTF-8
 if hasattr(sys.stdout, "reconfigure"):
@@ -72,7 +72,7 @@ def check(name: str, cond: bool, detail: str = "") -> None:
         print(f"  [FAIL] {name} {detail}")
 
 
-async def db() -> "AsyncEngine":
+async def db() -> AsyncEngine:
     return create_async_engine(settings.database_url)
 
 

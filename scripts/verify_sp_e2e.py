@@ -189,11 +189,11 @@ async def main() -> None:
         reasoning_events = [e for e in events if e["event"] == "reasoning"]
         if any(e["data"].get("stage") == "NO_EVIDENCE" for e in events
                if e["event"] == "thinking"):
-            print(f"\n[2] 分支: NO_EVIDENCE（检索无命中，未调 LLM）—— 契约完整但 AI 路径未验证")
+            print("\n[2] 分支: NO_EVIDENCE（检索无命中，未调 LLM）—— 契约完整但 AI 路径未验证")
             print("  可通过造标书/检查 milvus 集合后重跑验证 AI 双发。")
         elif any(e["data"].get("stage") == "LLM_DOWN" for e in events
                  if e["event"] == "thinking"):
-            print(f"\n[2] 分支: LLM_DOWN（断路器触发）—— 契约完整但 AI 路径未验证")
+            print("\n[2] 分支: LLM_DOWN（断路器触发）—— 契约完整但 AI 路径未验证")
         elif reasoning_events:
             print(f"\n[2] AI 路径条件断言（reasoning 事件 {len(reasoning_events)} 个）")
             # P7.x 思考契约：reasoning 是思考独立流（逐 delta，数量不定），answer/thought
@@ -226,7 +226,7 @@ async def main() -> None:
                        f"done.score={done['data'].get('score')} score事件={score['data'].get('score')}")
                 print(f"  score={score['data'].get('score')} | usage={usage['data'] if usage else None}")
 
-        print(f"\n[3] chat SSE 契约")
+        print("\n[3] chat SSE 契约")
         await _verify_chat(client, token, review["review_id"])
 
     print(f"\n========== 结果: {len(_passed)} 通过 / {len(_failed)} 失败 ==========")

@@ -13,9 +13,7 @@ import structlog
 from sqlalchemy import select, text
 
 from app.core.database import session_factory
-from app.models.bid_document import BidDocument
 from app.models.expert_review import ExpertReview
-from app.models.project import Lot
 
 logger = structlog.get_logger(__name__)
 

@@ -18,11 +18,10 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from pathlib import Path
 
 import httpx
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 # Windows 控制台 GBK 下中文输出乱码，强制 UTF-8
 if hasattr(sys.stdout, "reconfigure"):
@@ -60,7 +59,7 @@ def check(name: str, cond: bool, detail: str = "") -> None:
         print(f"  [FAIL] {name} {detail}")
 
 
-async def db() -> "AsyncEngine":
+async def db() -> AsyncEngine:
     return create_async_engine(settings.database_url)
 
 
@@ -253,7 +252,6 @@ async def main() -> None:
     check("超大文件 → 413", r.status_code == 413, f"status={r.status_code}")
     del big
     # lot 非 BIDDING → 400（临时改 LOT-006，finally 恢复）
-    lot_was_bidding = True
     try:
         async with engine.begin() as conn:
             await conn.execute(text("UPDATE lot SET status='PRE_SCREEN' WHERE lot_id='LOT-006'"))

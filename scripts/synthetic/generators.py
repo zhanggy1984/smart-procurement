@@ -23,7 +23,6 @@ from scripts.synthetic.common import (
     DIMENSION_TEMPLATES,
     EXPERT_ORGANIZATIONS,
     EXPERT_TAGS,
-    EXPERT_STATUSES,
     MANDATORY_DIMENSION,
     PROJECT_TYPES,
     REGIONS,
@@ -355,7 +354,6 @@ def generate_experts(rng: random.Random, fake: Faker, n: int) -> tuple[list[dict
     """
     experts: list[dict] = []
     users: list[dict] = []
-    tags_pool = EXPERT_TAGS.copy()
 
     for i in range(1, n + 1):
         expert_id = gen_id("expert", i)

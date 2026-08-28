@@ -23,7 +23,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # 项目根
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # 本包
 
-from sqlalchemy import delete, select  # noqa: E402
+from sqlalchemy import delete  # noqa: E402
 
 from app.ai.rag.chunker import SmartDocumentChunker  # noqa: E402
 from app.ai.rag.embedder import get_embedder  # noqa: E402

@@ -13,7 +13,6 @@ MySQL 使用独立 test schema（smart_procurement_test，根 conftest 已切换
 
 from __future__ import annotations
 
-import asyncio
 import os
 import subprocess
 import sys
@@ -26,7 +25,12 @@ ROOT = Path(__file__).resolve().parents[2]
 TEST_DB = os.environ.get("MYSQL_DATABASE", "smart_procurement_test")
 DB_URL = os.environ["MYSQL_URL"]
 
-_ROOT_URL = "mysql+asyncmy://root:root_infra_pass@localhost:33061"
+# root 建库连接串参数化：本地默认共享 infra（宿主 33061），CI 经 MYSQL_TEST_ROOT_URL
+# 覆盖（GitHub Actions mysql service 默认暴露 localhost:3306）。
+_ROOT_URL = os.environ.get(
+    "MYSQL_TEST_ROOT_URL",
+    "mysql+asyncmy://root:root_infra_pass@localhost:33061",
+)
 
 # 业务表（不含 alembic_version）。DDL 为逻辑外键、无 DB 约束，TRUNCATE 顺序无关。
 BUSINESS_TABLES = [
@@ -212,7 +216,6 @@ async def _reset_state():
     连接跨测试复用可能损坏（'Event loop is closed'）。每个测试前重置单例，
     模拟"每测试全新连接"，避免前序测试遗留连接污染。
     """
-    import app.api.v1.reviews as reviews_mod
     import app.core.redis as redis_core
     import app.tasks.dispatch as dispatch_mod
 
