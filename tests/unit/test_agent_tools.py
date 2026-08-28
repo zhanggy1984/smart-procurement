@@ -147,8 +147,15 @@ async def test_retrieve_knowledge_degraded(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_retrieve_knowledge_bid_none():
-    """bid 不存在：直接 error（无法检索）。"""
-    out = await execute_retrieve_knowledge(_ctx(bid=None), "技术方案")
+    """bid 不存在：直接 error（无法检索）。
+
+    注意：不能用 _ctx(bid=None)——_ctx 的 `bid or MagicMock(...)` 兜底会把
+    None 转成 MagicMock，无法表达"bid 不存在"（原实现因此真实走检索链连
+    外部库，无 infra 时误失败）。此处显式构造 ToolContext(bid=None)，命中
+    tools.py 的 `bid is None` 短路分支，离线可跑。
+    """
+    ctx = ToolContext(session=AsyncMock(), review=MagicMock(), bid=None)
+    out = await execute_retrieve_knowledge(ctx, "技术方案")
     assert out["source_count"] == 0
     assert "error" in out
 
