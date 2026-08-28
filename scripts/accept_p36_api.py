@@ -18,7 +18,6 @@ import json
 import os
 import sys
 import time
-import uuid
 
 import httpx
 from sqlalchemy import text

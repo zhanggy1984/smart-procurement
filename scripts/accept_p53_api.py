@@ -157,7 +157,6 @@ async def main() -> None:
 
     # 围串标组：LOT-003 SUP-001/002 相似 + 同价 + SAME_CONTROLLER
     token = await login()
-    headers = {"Authorization": f"Bearer {token}"}
     print("\n[围串标组] 相似+同价+同控制人")
     bid_a = await upload_parse(token, "LOT-003", "SUP-001", "围甲", 3280000, 42)
     bid_b = await upload_parse(token, "LOT-003", "SUP-002", "围乙", 3280000, 42)

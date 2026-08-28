@@ -50,7 +50,7 @@ async def main() -> None:
         print(f"  [误判] 期望={want} 实际={got} query={q} raw={raw!r}")
 
     ok = acc >= 0.90
-    print(f"[✓] 意图 ≥90% PASS" if ok else f"[X] 意图 ≥90% FAIL（acc={acc:.2f}）")
+    print("[✓] 意图 ≥90% PASS" if ok else f"[X] 意图 ≥90% FAIL（acc={acc:.2f}）")
     sys.exit(0 if ok else 1)
 
 
