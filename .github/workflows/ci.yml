@@ -41,18 +41,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 不用 cache: poetry —— setup-python 会在 poetry 尚未安装时就执行
+      # `poetry --version` 算缓存 key，直接抛 Unable to locate executable file。
+      # L0 只跑 ruff（单 wheel），纯 pip 装最稳，不过 poetry。
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: poetry
-
-      - name: 安装依赖（dev extra，含 ruff）
-        run: |
-          pip install poetry
-          poetry install -E dev
+          cache: pip
 
       - name: ruff F 类静态检查
-        run: poetry run ruff check app tests scripts --select F
+        run: |
+          pip install ruff==0.6.9   # 钉 poetry.lock 的锁定版本，避免门禁与本地漂移
+          ruff check app tests scripts --select F
 
   # ==================== L0：前端构建 ====================
   l0-build:
@@ -85,10 +85,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # cache 同样用 pip（原因同上：cache: poetry 要求 poetry 已装）。
+      # pip install poetry 会装进 setup-python 已加入 PATH 的 bin 目录，poetry 一定找得到。
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: poetry
+          cache: pip
 
       - name: 安装依赖
         run: |
