@@ -1,4 +1,6 @@
-"""评审 API（P3.3）。
+"""评审 API（P3.3）。本模块 = 交互层（四层架构 C 档 2026-08-28）：只做认证/权限/
+请求解析/SSE 格式化，消费控制层 chat_agent 事件流；不直接触碰资源层
+（models / conversation_service），对话状态管理已归位控制层 agent_loop.chat_agent。
 
 - POST /reviews            创建评审工作台（校验 bid=FROZEN，限 REVIEW_EXPERT）
 - POST /reviews/{id}/score SSE 流式评分（X-Idempotency-Key 幂等，报价走 price_calc）
@@ -18,22 +20,17 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.agent import chat_agent
+from app.ai.llm.deepseek_client import get_client
 from app.api.deps import require_roles
 from app.core.config import settings
 from app.core.database import get_db_session, session_factory
 from app.core.redis import get_redis, redis_warn_once
+from app.core.sse import sse_event
 from app.models.expert import Expert
 from app.models.user import Role, User
 from app.schemas.review import ChatRequest, ReviewCreate, ReviewOut, SaveScoreRequest
 from app.services import review_service as svc
-from app.services import conversation_service as conversation
-from app.ai.agent import CHAT_TOOLS, ToolContext, stream_agent
-from app.ai.llm.deepseek_client import get_client
-from app.ai.llm.prompts import ThinkingAnswerSplitter, build_chat_prompt
-from app.core.sse import sse_event
-from app.models.bid_document import BidDocument
-from app.models.conversation import ConversationMessage
-from app.models.project import ScoringDimension
 
 logger = structlog.get_logger(__name__)
 
@@ -276,100 +273,39 @@ async def stream_chat(
             "git_sha": "",
             "knowledge_version": "",
         }, seq := seq + 1)
-        full = ""
-        # 7.4 cache 字段：DeepSeek 响应带 prompt_cache_hit/miss_tokens，累加透传评测平台按命中价计成本
-        total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
-                       "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 0}
         try:
             async with session_factory() as s:
                 review = await s.get(svc.ExpertReview, review_id)
                 if review is None or review.expert_id != expert_id:
                     yield sse_event("error", {"detail": "评审记录不存在或非本人任务"}, seq := seq + 1)
                     return
-                # agent 模式（function calling）：检索由 LLM 自主决策（调 retrieve_knowledge 工具），
-                # 不再固定预检索；bid/dimension 供工具执行器组装上下文（retrieve 需 lot_id/bid_id，
-                # rubric 工具需 dimension）。决策轮事件静默（保三发对齐契约），作答轮统一走
-                # splitter 三发，full 仅存 answer 段（思考不进对话历史，避免污染摘要）。
-                bid = await s.get(BidDocument, review.bid_id)
-                dimension = await s.get(ScoringDimension, review.dimension_id)
-                # 回指意图归队依赖：最近 user 消息原文（倒序，此时尚未写入当前问题）。
-                # _classify_intent 的 history 参数用它把"就这个/还有呢"延续到上一轮意图。
-                recent_user = (
-                    await s.scalars(
-                        select(ConversationMessage)
-                        .where(ConversationMessage.review_id == review_id,
-                               ConversationMessage.dimension_id == review.dimension_id,
-                               ConversationMessage.role == "user")
-                        .order_by(ConversationMessage.dim_turn_number.desc())
-                        .limit(3)
-                    )
-                ).all()
-                ctx = ToolContext(session=s, review=review, bid=bid, dimension=dimension,
-                                  history=[m.content for m in recent_user])
-                await conversation.add_message(
-                    s, review_id=review_id, dimension_id=review.dimension_id,
-                    role="user", content=body.question,
-                )
-                context = await conversation.get_context(
-                    s, review_id=review_id, dimension_id=review.dimension_id
-                )
-                # P7.x tools 声明：agent 决策轮 system 声明工具可用与调用约束，LLM 自主决定是否调用
-                prompt = build_chat_prompt(
-                    role_context="你是标书评审专家助手，结合标书内容与当前评审上下文回答专家的追问。",
-                    context=context, history=[], question=body.question,
-                    chunks=None, tools_declared=True,
-                )
+                # C 档分层：对话状态管理（bid/dimension/回指 history 加载、user/assistant
+                # 落库、get_context、摘要）已归位控制层 chat_agent；交互层只消费事件做格式化
                 yield sse_event("thinking", {"stage": "CHAT"}, seq := seq + 1)
-                try:
-                    # P7.x：agent 决策轮静默（工具决策不外发 reasoning/answer），作答轮 content
-                    # 进 splitter 三发（reasoning/answer/thought 对齐）；三路兜底固定话术无
-                    # <thinking> 标签 → 全文当 answer（降级契约不破）
-                    async for ev in stream_agent(prompt, CHAT_TOOLS, ctx):
-                        etype = ev["type"]
-                        if etype == "tool_call":
-                            # 契约 tool_call 事件：评测端观测 LLM 决策调用的内部工具 + 检索质量元信息
-                            yield sse_event("tool_call", {
-                                "id": f"tool-{time.time_ns()}",
-                                "name": ev["name"],
-                                "args": ev["args"],
-                                "result": ev["result"],
-                                "status": ev["status"],
-                                "intent": ev["intent"],
-                            }, seq := seq + 1)
-                        elif etype == "answer":
-                            total_usage = dict(ev["usage"])
-                            splitter = ThinkingAnswerSplitter()
-                            for kind, piece in splitter.feed(ev["text"]):
-                                if not piece:
-                                    continue
-                                if kind == "reasoning":
-                                    yield sse_event("reasoning", {"delta": piece}, seq := seq + 1)
-                                else:
-                                    full += piece
-                                    yield sse_event("answer", {"delta": piece}, seq := seq + 1)
-                                    yield sse_event("thought", {"delta": piece}, seq := seq + 1)
-                            for kind, piece in splitter.flush():
-                                if not piece:
-                                    continue
-                                if kind == "reasoning":
-                                    yield sse_event("reasoning", {"delta": piece}, seq := seq + 1)
-                                else:
-                                    full += piece
-                                    yield sse_event("answer", {"delta": piece}, seq := seq + 1)
-                                    yield sse_event("thought", {"delta": piece}, seq := seq + 1)
-                        elif etype == "error":
-                            yield sse_event("error", {"detail": ev["message"]}, seq := seq + 1)
-                finally:
-                    if full.strip():
-                        await conversation.add_message(
-                            s, review_id=review_id, dimension_id=review.dimension_id,
-                            role="assistant", content=full,
-                        )
-                        await conversation.maybe_summarize(
-                            s, review_id=review_id, dimension_id=review.dimension_id
-                        )
-                yield sse_event("usage", total_usage, seq := seq + 1)
-                yield sse_event("done", {"content": full}, seq := seq + 1)
+                async for ev in chat_agent(s, review=review, question=body.question):
+                    etype = ev["type"]
+                    if etype == "tool_call":
+                        # 契约 tool_call 事件：评测端观测 LLM 决策调用的内部工具 + 检索质量元信息
+                        yield sse_event("tool_call", {
+                            "id": f"tool-{time.time_ns()}",
+                            "name": ev["name"],
+                            "args": ev["args"],
+                            "result": ev["result"],
+                            "status": ev["status"],
+                            "intent": ev["intent"],
+                        }, seq := seq + 1)
+                    elif etype == "reasoning":
+                        yield sse_event("reasoning", {"delta": ev["delta"]}, seq := seq + 1)
+                    elif etype == "answer":
+                        # 契约三发对齐：answer 段同时发 answer + thought 帧（splitter 已在控制层切分）
+                        yield sse_event("answer", {"delta": ev["delta"]}, seq := seq + 1)
+                        yield sse_event("thought", {"delta": ev["delta"]}, seq := seq + 1)
+                    elif etype == "error":
+                        yield sse_event("error", {"detail": ev["message"]}, seq := seq + 1)
+                    elif etype == "done":
+                        # 7.4 cache 字段：usage 累加透传评测平台；done 带控制层落库的纯作答全文
+                        yield sse_event("usage", ev["usage"], seq := seq + 1)
+                        yield sse_event("done", {"content": ev["content"]}, seq := seq + 1)
         except Exception as e:  # noqa: BLE001  已开流不吞：error 帧收尾，前端提示重试
             logger.warning("review.chat_stream_error", review_id=review_id, error=str(e))
             yield sse_event("error", {"detail": "AI 对话中断，请重试"}, seq := seq + 1)
