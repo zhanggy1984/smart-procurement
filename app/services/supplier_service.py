@@ -35,7 +35,7 @@ from app.services.outbox import write_outbox_event
 logger = structlog.get_logger(__name__)
 
 # 导入初始密码（与合成数据一致）
-INITIAL_PASSWORD = "Smart@2026"
+INITIAL_PASSWORD = "123456"
 
 # 定标终态（黑名单级联豁免口径：AWARDED 项目关联评审不变）
 _AWARDED = "AWARDED"

@@ -20,7 +20,7 @@ MANIFEST = {
         {"name": "score", "path": "/api/v1/reviews/{review_id}/score", "method": "POST",
          "contract_type": "sse", "llm": True,
          "description": "AI 评分（SSE，含 tool_call knowledge_retrieval；报价维度走 price_calc，run 前需用例规避）"},
-        {"name": "login", "path": "/api/v1/auth/login", "method": "POST",
+        {"name": "login", "path": "/api/auth/login", "method": "POST",
          "llm": False, "description": "专家/管理员鉴权（辅助接口）"},
     ],
     "scenes": [
@@ -32,7 +32,7 @@ MANIFEST = {
     "contract": {
         "type": "sse", "timeout": 120,
         "prepare": [
-            {"name": "login", "method": "POST", "path": "/api/v1/auth/login",
+            {"name": "login", "method": "POST", "path": "/api/auth/login",
              "body": {"username": "{{auth.username}}", "password": "{{auth.password}}"},
              "extract": {"token": "access_token"}},
             # 评审需 FROZEN 标书 + 专家账号（display_name==expert.name 反查 expert_id）

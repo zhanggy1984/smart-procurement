@@ -28,7 +28,7 @@
       <el-alert type="info" :closable="false" class="demo-tip">
         <template #title>
           <div class="demo-accounts">
-            <div>演示账号（密码均为 <b>Smart@2026</b>）：</div>
+            <div>演示账号（密码均为 <b>123456</b>）：</div>
             <div>管理员 <code>admin</code> ｜ 项目经理 <code>pm1</code></div>
             <div>评审专家 <code>expert_01</code> ｜ 供应商 <code>supplier_01</code></div>
           </div>

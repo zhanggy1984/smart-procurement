@@ -29,7 +29,7 @@ from app.services.outbox import write_outbox_event
 logger = structlog.get_logger(__name__)
 
 # 导入初始密码（与合成数据一致，满足复杂度：≥8 位 + 大小写 + 数字）
-INITIAL_PASSWORD = "Smart@2026"
+INITIAL_PASSWORD = "123456"
 
 
 class ExpertImportError(ValueError):

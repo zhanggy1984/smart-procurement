@@ -103,7 +103,7 @@ def make_pdf(company: str, seed: int | None = None, body: list[str] | None = Non
 
 
 # 验收账号密码：优先读环境变量，兜底与系统初始密码一致（INITIAL_PASSWORD）
-TEST_PASSWORD = os.environ.get("SP_TEST_PASSWORD", "Smart@2026")
+TEST_PASSWORD = os.environ.get("SP_TEST_PASSWORD", "123456")
 
 
 async def login(username: str) -> str:

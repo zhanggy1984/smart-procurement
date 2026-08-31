@@ -7,8 +7,8 @@ from app.api.v1 import (auth, bids, closeouts, config, conflicts, declarations, 
                          suppliers, users)
 
 # 业务路由统一挂 /api/v1 前缀（内部各 router 不再重复加前缀）
+# T15：auth 不再挂 /api/v1，改由 main.py 单独挂 /api（登录路由统一 /api/auth/login）
 api_v1_router = APIRouter(prefix="/api/v1")
-api_v1_router.include_router(auth.router)
 api_v1_router.include_router(projects.router)
 api_v1_router.include_router(experts.router)
 api_v1_router.include_router(suppliers.router)
