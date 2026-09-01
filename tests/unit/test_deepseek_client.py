@@ -71,7 +71,11 @@ async def test_circuit_opens_after_threshold():
 
 @pytest.mark.asyncio
 async def test_circuit_half_open_probe_success():
-    """到期后 HALF_OPEN 放行 1 次探测，成功 → CLOSED 并清零计数。"""
+    """到期后 acquire 转 HALF_OPEN 并放行（串行路径），成功 → CLOSED 并清零计数。
+
+    注意：并发下半开期间所有请求均放行，并非"仅 1 次探测"（定案暂不收紧，
+    见 deepseek_client 模块 docstring）。
+    """
     cb = _CircuitBreaker(threshold=2, open_seconds=0.05)
     await cb.record_failure()
     await cb.record_failure()
@@ -85,7 +89,7 @@ async def test_circuit_half_open_probe_success():
 
 @pytest.mark.asyncio
 async def test_circuit_half_open_probe_fail_reopens():
-    """半开探测失败 → 重回 OPEN 且重新计时。"""
+    """半开探测失败 → 重回 OPEN 且重新计时（串行路径；并发竞态见 deepseek_client 模块 docstring）。"""
     cb = _CircuitBreaker(threshold=2, open_seconds=0.05)
     await cb.record_failure()
     await cb.record_failure()

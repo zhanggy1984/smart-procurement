@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 
 import httpx
@@ -36,7 +37,8 @@ from app.models.user import Role, User
 
 # 容器内 app 直连自身 8000（契约事件由 app 产出，走 nginx 反代内容一致）
 BASE = "http://localhost:8000/api/v1"
-PASSWORD = "SpVerify#2026"
+# T15 口令统一 123456：优先读环境变量，兜底与系统初始密码一致（INITIAL_PASSWORD）
+PASSWORD = os.environ.get("SP_TEST_PASSWORD", "123456")
 USERNAME = "sp_verify"
 
 _passed: list[str] = []
@@ -90,7 +92,8 @@ async def _ensure_verify_user(s, expert_name: str) -> None:
 
 
 async def _login(client: httpx.AsyncClient) -> str:
-    r = await client.post(f"{BASE}/auth/login",
+    # T15：登录路由从 /api/v1 挪到 /api/auth（统一契约路径）；BASE 其余端点仍挂 /api/v1
+    r = await client.post("http://localhost:8000/api/auth/login",
                           json={"username": USERNAME, "password": PASSWORD})
     r.raise_for_status()
     return r.json()["access_token"]

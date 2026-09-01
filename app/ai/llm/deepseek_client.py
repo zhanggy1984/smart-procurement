@@ -2,8 +2,10 @@
 
 - chat_stream()：SSE 流式调用（temperature=0.3），async generator 逐段吐文本
 - chat()：非流式便捷封装（摘要/结构化调用）
-- 断路器：连续 N 次超时/5xx → OPEN（熔断 30s）→ HALF_OPEN 放行 1 次探测 →
-  成功 CLOSE / 失败重回 OPEN。N 由 DEEPSEEK_CIRCUIT_BREAKER_THRESHOLD（默认 5）。
+- 断路器：连续 N 次超时/5xx → OPEN（熔断 30s）→ 到期后首个 acquire 转 HALF_OPEN 放行，
+  半开期间后续 acquire 一并放行（无单探测并发门——定案暂不收紧，见 memory
+  circuit-breaker-half-open-concurrency）。探测成功 CLOSE / 失败重回 OPEN。
+  N 由 DEEPSEEK_CIRCUIT_BREAKER_THRESHOLD（默认 5）。
 - 重试（task.md P3.1）：
   - 429（限流）→ 1s/2s/4s 退避，重试 3 次，不熔断
   - 502/503 → 0.5s/1s/3s，重试 2 次（比 429 少 1 次），且计入熔断失败
@@ -57,7 +59,11 @@ class _CircuitBreaker:
         self._lock = asyncio.Lock()
 
     async def acquire(self) -> None:
-        """调用前检查。OPEN 未到期 → 抛 CircuitOpenError；到期 → 转 HALF_OPEN。"""
+        """调用前检查。OPEN 未到期 → 抛 CircuitOpenError；到期 → 转 HALF_OPEN 放行。
+
+        注意：HALF_OPEN 期间不拦截（无单探测并发门），OPEN 到期瞬间的并发请求会
+        全部放行。当前场景（云 API + 低并发）影响中低，定案暂不收紧——见模块 docstring。
+        """
         async with self._lock:
             if self._state == CIRCUIT_OPEN and time.monotonic() < self._open_until:
                 raise CircuitOpenError("AI 服务熔断中（断路器 OPEN），请稍后重试")
