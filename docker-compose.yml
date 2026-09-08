@@ -25,6 +25,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # obs-sdk named context：观测 SDK 源码（归属 agent-evaluation-online 仓 sdk/，§11.3 接入）。
+      # 构建期经 BuildKit 独立 context 注入镜像（Dockerfile COPY --from=obs-sdk）。绝对路径针对
+      # 本地共享 infra；换机/CI 部署时改 ../agent-evaluation-online/sdk 或注入环境变量。
+      additional_contexts:
+        obs-sdk: D:/study/aiprojcet/agent-evaluation-online/sdk
     container_name: sp-app
     environment:
       # MySQL（连接串显式覆盖 .env，pydantic-settings env 优先）
@@ -56,6 +61,17 @@ services:
       # FERNET 身份证加密密钥（fail loud）：生产必须设置真实 key（openssl rand -base64 32 生成），
       # 开发/演示环境显式 FERNET_KEY=auto 允许进程内随机 key
       FERNET_KEY: ${FERNET_KEY:?FERNET_KEY 必须设置（生产：openssl rand -base64 32；开发/演示可填 auto）}
+      # 观测上报 obs_sdk（§11.3 sp 接入，可选）：OBS_ENABLED=false（默认）→ 全链路零打点零开销；
+      # 三要素齐备才启用。topic 须完整 `{env}.obs.agent.smart-procurement`（消费白名单名全名）。
+      OBS_ENABLED: ${OBS_ENABLED:-false}
+      OBS_KAFKA_SERVERS: ${OBS_KAFKA_SERVERS:-localhost:39092}
+      OBS_KAFKA_TOPIC: ${OBS_KAFKA_TOPIC:-dev.obs.agent.smart-procurement}
+      OBS_KAFKA_SASL_USERNAME: ${OBS_KAFKA_SASL_USERNAME:-}
+      OBS_KAFKA_SASL_PASSWORD: ${OBS_KAFKA_SASL_PASSWORD:-}
+      OBS_FLUSH_BATCH: ${OBS_FLUSH_BATCH:-500}
+      OBS_FLUSH_INTERVAL_S: ${OBS_FLUSH_INTERVAL_S:-2}
+      # 上报事件版本号（obs_sdk 从 env 读；缺失则事件不带该字段）
+      AGENT_VERSION: ${AGENT_VERSION:-0.1.0}
     ports:
       - "${SP_APP_PORT:-18002}:8000"
     volumes:
@@ -77,6 +93,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # 与 app 同 Dockerfile（引用 --from=obs-sdk），必须同给 additional_contexts 否则构建失败；
+      # worker(arq) 不 init obs_sdk，仅镜像含包（不产事件）。
+      additional_contexts:
+        obs-sdk: D:/study/aiprojcet/agent-evaluation-online/sdk
     container_name: sp-worker
     command: arq app.tasks.worker.WorkerSettings
     environment:

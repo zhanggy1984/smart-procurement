@@ -24,9 +24,20 @@ import openai
 import structlog
 
 from app.core.config import settings
+from app.obs import (
+    llm_start as _obs_llm_start,
+    record_llm_error as _obs_llm_error,
+    record_llm_ok as _obs_llm_ok,
+)
 from app.services import config_service
 
 logger = structlog.get_logger(__name__)
+
+# 观测 seam 说明（§11.3 sp #3）：deepseek_client 是 sp 唯一底层 LLM 通道（chat_stream /
+# chat_stream_agent / chat），在此统一层出口打点即覆盖 agent_loop/review_service/
+# fraud_detection/tag_translation 全部业务 LLM；重试内部多次 create 属同一逻辑调用不分别记
+# （仅最终成功一次 ok / 最终上抛一次 error）；CircuitOpenError（熔断/停用前置拒绝）不打点，
+# 由 request HTTP_503 反映（对齐 cs）。打点 helper 内部经 app.obs gate 现取 sdk，未启用零开销。
 
 # 熔断状态
 CIRCUIT_CLOSED = "CLOSED"
@@ -147,6 +158,8 @@ class DeepSeekClient:
         await self._circuit.acquire()
         if not settings.deepseek_enabled:
             raise CircuitOpenError("AI 服务已停用（DEEPSEEK_ENABLED=false），请人工评审")
+        _obs_started = _obs_llm_start()  # 熔断/停用前置拒绝不打点（request 503 已反映），此处才起算
+        _obs_usage: dict | None = None  # include_usage 流末 usage chunk → llm_call ok 的 token 计数
         attempts = 0
         while True:
             try:
@@ -161,11 +174,13 @@ class DeepSeekClient:
                 async for chunk in stream:
                     if chunk.usage:
                         # include_usage 的最后一个 chunk：usage 非空、choices 为空
+                        _obs_usage = chunk.usage.model_dump()
                         yield "", chunk.usage.model_dump()
                         continue
                     if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
                         yield chunk.choices[0].delta.content, None
                 await self._circuit.record_success()
+                _obs_llm_ok(_obs_started, _obs_usage)
                 return
             except CircuitOpenError:
                 raise
@@ -175,9 +190,11 @@ class DeepSeekClient:
                 if _is_fuse_failure(e):
                     await self._circuit.record_failure()
                 if isinstance(e, (openai.AuthenticationError, openai.PermissionDeniedError)):
+                    _obs_llm_error(_obs_started, e)  # §2.4 先记 error 再抛（配置错误不重试）
                     logger.error("llm.auth_failed", error=str(e))
                     raise
                 if attempts >= len(schedule):
+                    _obs_llm_error(_obs_started, e)  # 重试耗尽：最终失败，先记 error 再抛
                     raise
                 delay = schedule[attempts]
                 attempts += 1
@@ -210,6 +227,8 @@ class DeepSeekClient:
         await self._circuit.acquire()
         if not settings.deepseek_enabled:
             raise CircuitOpenError("AI 服务已停用（DEEPSEEK_ENABLED=false），请人工评审")
+        _obs_started = _obs_llm_start()  # 熔断/停用前置拒绝不打点（request 503 已反映），此处才起算
+        _obs_usage: dict | None = None  # include_usage 流末 usage chunk → llm_call ok 的 token 计数
         attempts = 0
         while True:
             try:
@@ -226,6 +245,7 @@ class DeepSeekClient:
                 tool_acc: dict[int, dict] = {}
                 async for chunk in stream:
                     if chunk.usage:
+                        _obs_usage = chunk.usage.model_dump()
                         yield {"type": "usage", "usage": chunk.usage.model_dump()}
                         continue
                     if not chunk.choices:
@@ -259,6 +279,7 @@ class DeepSeekClient:
                         }
                         tool_acc.clear()
                 await self._circuit.record_success()
+                _obs_llm_ok(_obs_started, _obs_usage)
                 return
             except CircuitOpenError:
                 raise
@@ -268,9 +289,11 @@ class DeepSeekClient:
                 if _is_fuse_failure(e):
                     await self._circuit.record_failure()
                 if isinstance(e, (openai.AuthenticationError, openai.PermissionDeniedError)):
+                    _obs_llm_error(_obs_started, e)  # §2.4 先记 error 再抛（配置错误不重试）
                     logger.error("llm.auth_failed", error=str(e))
                     raise
                 if attempts >= len(schedule):
+                    _obs_llm_error(_obs_started, e)  # 重试耗尽：最终失败，先记 error 再抛
                     raise
                 delay = schedule[attempts]
                 attempts += 1
@@ -295,6 +318,7 @@ class DeepSeekClient:
         await self._circuit.acquire()
         if not settings.deepseek_enabled:
             raise CircuitOpenError("AI 服务已停用（DEEPSEEK_ENABLED=false），请人工评审")
+        _obs_started = _obs_llm_start()  # 熔断/停用前置拒绝不打点（request 503 已反映），此处才起算
         attempts = 0
         while True:
             try:
@@ -305,6 +329,7 @@ class DeepSeekClient:
                     max_tokens=max_tokens,
                 )
                 await self._circuit.record_success()
+                _obs_llm_ok(_obs_started, resp.usage.model_dump() if getattr(resp, "usage", None) else None)
                 return resp.choices[0].message.content or ""
             except CircuitOpenError:
                 raise
@@ -314,9 +339,11 @@ class DeepSeekClient:
                 if _is_fuse_failure(e):
                     await self._circuit.record_failure()
                 if isinstance(e, (openai.AuthenticationError, openai.PermissionDeniedError)):
+                    _obs_llm_error(_obs_started, e)  # §2.4 先记 error 再抛（配置错误不重试）
                     logger.error("llm.auth_failed", error=str(e))
                     raise
                 if attempts >= len(schedule):
+                    _obs_llm_error(_obs_started, e)  # 重试耗尽：最终失败，先记 error 再抛
                     raise
                 delay = schedule[attempts]
                 attempts += 1

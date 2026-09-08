@@ -155,8 +155,20 @@ async def get_context(
 
 
 async def _summarize_with_llm(stage: list[ConversationMessage]) -> str | None:
-    """DeepSeek 摘要压缩一段对话。失败返回 None（调用方兜底保留原文）。"""
+    """DeepSeek 摘要压缩一段对话。失败返回 None（调用方兜底保留原文）。
+
+    §11.3 sp：本函数是自建 AsyncOpenAI 的汇总旁路（不经 deepseek_client 统一层），
+    单独在此出口打点。调用在 stream_chat SSE 流内（request span 内 async 同上下文，
+    无需合成 span）。观测 helper 局部导入避顶部 import 环；gate 关闭零开销。
+    """
+    from app.obs import (
+        llm_start as _obs_start,
+        record_llm_error as _obs_err,
+        record_llm_ok as _obs_ok,
+    )
+
     transcript = "\n".join(f"{m.role}: {m.content}" for m in stage)
+    _obs_started = _obs_start()
     try:
         from openai import AsyncOpenAI
 
@@ -185,8 +197,10 @@ async def _summarize_with_llm(stage: list[ConversationMessage]) -> str | None:
             max_tokens=SUMMARY_MAX_TOKENS,
         )
         text = (r.choices[0].message.content or "").strip()
+        _obs_ok(_obs_started, r.usage.model_dump() if getattr(r, "usage", None) else None)
         return text or None
     except Exception as e:  # noqa: BLE001  LLM 不可用/超时，走原文兜底
+        _obs_err(_obs_started, e)  # §2.4：调用失败先记 error 再走业务兜底（本函数吞异常返 None）
         logger.warning("conversation.summary_llm_failed", error=str(e))
         return None
 

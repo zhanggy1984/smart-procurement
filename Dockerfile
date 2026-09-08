@@ -34,6 +34,13 @@ RUN pip install --no-cache-dir poetry==2.0.1 \
     && poetry install --only main --no-interaction --no-ansi \
     && rm -rf /root/.cache/pip
 
+# obs-sdk 观测 SDK（§11.3 sp 接入）：经 compose additional_contexts（obs-sdk → 本 COPY 的
+# --from=obs-sdk）独立 context 注入镜像；poetry install 后独立 pip 装进同一 site-packages
+# （virtualenvs.create false），不入 poetry.lock。观测边带默认 OBS_ENABLED=false 零打点；
+# structlog processor 仅在启用 + 包存在时插链。worker 与 app 共享本镜像（worker 不 init）。
+COPY --from=obs-sdk / /obs-sdk-src
+RUN pip install --no-cache-dir /obs-sdk-src && rm -rf /root/.cache/pip
+
 # 切换非 root 用户
 USER app
 
