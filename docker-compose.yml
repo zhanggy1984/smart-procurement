@@ -64,7 +64,7 @@ services:
       # 观测上报 obs_sdk（§11.3 sp 接入，可选）：OBS_ENABLED=false（默认）→ 全链路零打点零开销；
       # 三要素齐备才启用。topic 须完整 `{env}.obs.agent.smart-procurement`（消费白名单名全名）。
       OBS_ENABLED: ${OBS_ENABLED:-false}
-      OBS_KAFKA_SERVERS: ${OBS_KAFKA_SERVERS:-localhost:39092}
+      OBS_KAFKA_SERVERS: ${OBS_KAFKA_SERVERS:-kafka:19092}  # 容器内默认 INTERNAL(:19092) 绕 NAT 黑洞；宿主直连在 .env 显式设 localhost:39092
       OBS_KAFKA_TOPIC: ${OBS_KAFKA_TOPIC:-dev.obs.agent.smart-procurement}
       OBS_KAFKA_SASL_USERNAME: ${OBS_KAFKA_SASL_USERNAME:-}
       OBS_KAFKA_SASL_PASSWORD: ${OBS_KAFKA_SASL_PASSWORD:-}
