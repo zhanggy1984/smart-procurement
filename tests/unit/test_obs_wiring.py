@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -515,6 +516,114 @@ async def test_chat_stream_ok_records_usage(monkeypatch):
     assert ok_mock.call_args.args[1] == \
         {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
     assert err_mock.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_ok_recorded_when_consumer_closes_midstream(monkeypatch):
+    """消费方中途弃用（aclose()）：ok 收口仍须记账。
+
+    GeneratorExit 承 BaseException，except Exception 接不住 ⇒ 写在流末的收口会静默全丢。
+    **真机对照**（gq 侧 2026-09-15，三仓同形缺陷）：截断驱动零 llm_call、完整 drain 才有。
+    本仓用 except GeneratorExit 而**不用 finally** —— 该 try 被 while 重试环包住，finally 会
+    在每次试次都触发，把「试次失败待重试」记成 ok。
+    """
+    ok_mock, err_mock = _open_llm_gate(monkeypatch)
+
+    async def _stream():
+        yield _Chunk(choices=[_Choice(_Delta(content="评审"))])
+        yield _Chunk(usage=_Usage(prompt_tokens=10, completion_tokens=5, total_tokens=15))
+
+    async def _create(**kw):
+        return _stream()
+
+    inst = _mk_instance(monkeypatch, _create)
+    gen = inst.chat_stream(
+        [{"role": "user", "content": "hi"}], temperature=0.3, max_tokens=2048)
+    first = await gen.__anext__()
+    assert first[0] == "评审", "只驱动一步 = 断连现场"
+    await gen.aclose()
+
+    assert ok_mock.call_count == 1, "一次调用一条账（既不能丢，也不能 finally 逐试次重复记）"
+    assert err_mock.call_count == 0, "弃用不是错误，不得记 error"
+    assert ok_mock.call_args.args[1] is None, "断连早于 usage chunk ⇒ usage 空，但状态仍为 ok"
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_agent_ok_recorded_when_consumer_closes_midstream(monkeypatch):
+    """chat_stream_agent 的弃用收口——第二处 `except GeneratorExit` 的独立护栏。
+
+    与 chat_stream 是**两个独立烤点**（各自一个 except 块）：只驱动 chat_stream 的用例对
+    本方法**零判别力**（实测删掉本处的 except 块、全量 365 仍全绿）。故单列一条。
+    """
+    ok_mock, err_mock = _open_llm_gate(monkeypatch)
+
+    async def _stream():
+        yield _Chunk(choices=[_Choice(_Delta(content="决策"))])
+        yield _Chunk(usage=_Usage(prompt_tokens=10, completion_tokens=5, total_tokens=15))
+
+    async def _create(**kw):
+        return _stream()
+
+    inst = _mk_instance(monkeypatch, _create)
+    gen = inst.chat_stream_agent(
+        [{"role": "user", "content": "hi"}], [], temperature=0.3, max_tokens=2048)
+    first = await gen.__anext__()
+    assert first == {"type": "content", "delta": "决策"}, "只驱动一步 = 断连现场"
+    await gen.aclose()
+
+    assert ok_mock.call_count == 1, "一次调用一条账"
+    assert err_mock.call_count == 0, "弃用不是错误"
+    assert ok_mock.call_args.args[1] is None, "断连早于 usage chunk ⇒ usage 空，状态仍为 ok"
+
+
+@pytest.mark.parametrize("method", ["chat_stream", "chat_stream_agent"])
+@pytest.mark.asyncio
+async def test_stream_abandoned_during_retry_backoff_records_error(monkeypatch, method):
+    """退避等待期被取消（第二条黑洞出口）：仍须落一条 llm_call，不得整条消失。
+
+    与上面两条的出口**不同**：那两条发生在 try 体里的 yield 点（可触发 GeneratorExit）；
+    本条发生在本处理器的 `await asyncio.sleep(backoff)` 上——此时生成器**正在执行**，
+    `aclose()` 会报 already running，真正的出口是**任务取消**（CancelledError）。而兄弟
+    except 子句**不覆盖本处理器内抛出的异常** ⇒ 没有内层守卫时它会经 while 环直接冲出
+    生成器：既无 ok 也无 error（`record_failure` 已先记 ⇒ 账目半截）。
+    """
+    ok_mock, err_mock = _open_llm_gate(monkeypatch)
+    first_err = _err(503)
+
+    async def _create(**kw):
+        raise first_err
+
+    _never = asyncio.Event()
+
+    class _FakeAsyncio:
+        # 本桩只替换 dc 模块内的 asyncio 引用，**必须把该模块还用到的属性一并代理**——
+        # 漏了就变成「测试桩把生产代码弄崩」（首跑即踩：生产代码取 asyncio.CancelledError
+        # 拿到 AttributeError）。此处 dc 只用 sleep 与 CancelledError 两个名字。
+        CancelledError = asyncio.CancelledError
+
+        @staticmethod
+        async def sleep(_delay):
+            await _never.wait()  # 永不返回 ⇒ 生成器停在退避等待处
+
+    monkeypatch.setattr(dc, "asyncio", _FakeAsyncio)
+    inst = _mk_instance(monkeypatch, _create)
+    msgs = [{"role": "user", "content": "hi"}]
+    # 两个流式方法各有**独立**一处守卫 ⇒ 必须各自驱动，否则删掉 agent 侧那处照样全绿
+    if method == "chat_stream":
+        gen = inst.chat_stream(msgs, temperature=0.3, max_tokens=2048)
+    else:
+        gen = inst.chat_stream_agent(msgs, [], temperature=0.3, max_tokens=2048)
+    task = asyncio.create_task(gen.__anext__())
+    for _ in range(5):  # 推进到退避等待（create 抛错 → 记熔断 → sleep）
+        await asyncio.sleep(0)
+    assert not task.done(), "前提：生成器确已停在退避等待，而非提前结束"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert ok_mock.call_count == 0, "本调用一次都没成功 ⇒ 记 ok 是假成功"
+    assert err_mock.call_count == 1, "退避期被取消仍须落一条账（否则整条 llm_call 消失）"
+    assert err_mock.call_args.args[1] is first_err, "按最后一次失败记 error"
 
 
 @pytest.mark.asyncio

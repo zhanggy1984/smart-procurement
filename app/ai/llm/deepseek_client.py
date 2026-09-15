@@ -184,22 +184,41 @@ class DeepSeekClient:
                 return
             except CircuitOpenError:
                 raise
+            except GeneratorExit:
+                # 消费方中途弃用（客户端断连 → aclose()）：GeneratorExit 落在上面的 yield 点、
+                # 承 BaseException，下面的 except Exception 接不住 ⇒ 写在流末的 ok 收口会静默
+                # 全丢（gq 侧真机对照：截断驱动零 llm_call、完整 drain 才有）。**覆盖边界：只
+                # 覆盖「悬在 try 体内 yield 点」这一种出口**——退避等待期的弃用/取消由下面的
+                # 处理器内守卫兜（见那处注释）。**此处不可用 finally**：本 try 被 while 重试环
+                # 包住，finally 会在**每次试次**都触发，把「试次失败待重试」记成 ok（双账 + 假成功）。
+                _obs_llm_ok(_obs_started, _obs_usage)
+                raise
             except Exception as e:  # noqa: BLE001  openai 各类异常统一按状态码处理
-                status = getattr(e, "status_code", None)
-                schedule = _retry_schedule(status) if status else _BACKOFF_5XX
-                if _is_fuse_failure(e):
-                    await self._circuit.record_failure()
-                if isinstance(e, (openai.AuthenticationError, openai.PermissionDeniedError)):
-                    _obs_llm_error(_obs_started, e)  # §2.4 先记 error 再抛（配置错误不重试）
-                    logger.error("llm.auth_failed", error=str(e))
+                try:
+                    status = getattr(e, "status_code", None)
+                    schedule = _retry_schedule(status) if status else _BACKOFF_5XX
+                    if _is_fuse_failure(e):
+                        await self._circuit.record_failure()
+                    if isinstance(e, (openai.AuthenticationError, openai.PermissionDeniedError)):
+                        _obs_llm_error(_obs_started, e)  # §2.4 先记 error 再抛（配置错误不重试）
+                        logger.error("llm.auth_failed", error=str(e))
+                        raise
+                    if attempts >= len(schedule):
+                        _obs_llm_error(_obs_started, e)  # 重试耗尽：最终失败，先记 error 再抛
+                        raise
+                    delay = schedule[attempts]
+                    attempts += 1
+                    logger.warning("llm.retry", status=status, attempt=attempts, delay=delay, error=str(e))
+                    await asyncio.sleep(delay)
+                except (GeneratorExit, asyncio.CancelledError):
+                    # 退避等待期的第二条黑洞出口：此时生成器**处于执行中**（悬在 record_failure /
+                    # sleep 的 await 上），弃用只能由任务取消（CancelledError）触发、aclose() 会报
+                    # already running。本处理器内抛出的异常**不会被上面的兄弟 except 子句接住**
+                    # （兄弟子句只覆盖 try 体）⇒ 它会经 while 环直接冲出生成器：既无 ok 也无 error，
+                    # 整条 llm_call 静默消失，而 record_failure 已先记（账目半截）。按「最后一次
+                    # 失败」记 error —— 本调用确实一次都没成功，记 ok 是假成功。
+                    _obs_llm_error(_obs_started, e)
                     raise
-                if attempts >= len(schedule):
-                    _obs_llm_error(_obs_started, e)  # 重试耗尽：最终失败，先记 error 再抛
-                    raise
-                delay = schedule[attempts]
-                attempts += 1
-                logger.warning("llm.retry", status=status, attempt=attempts, delay=delay, error=str(e))
-                await asyncio.sleep(delay)
 
     async def chat_stream_agent(
         self,
@@ -283,22 +302,33 @@ class DeepSeekClient:
                 return
             except CircuitOpenError:
                 raise
+            except GeneratorExit:
+                # 同 chat_stream：弃用时 GeneratorExit 不被 except Exception 接住，流末的 ok
+                # 收口会静默全丢；此处用 except 而不用 finally，理由同 chat_stream（外层有
+                # while 重试环，finally 会逐试次补记 ok）。覆盖边界同 chat_stream：只管 yield 点。
+                _obs_llm_ok(_obs_started, _obs_usage)
+                raise
             except Exception as e:  # noqa: BLE001  openai 各类异常统一按状态码处理
-                status = getattr(e, "status_code", None)
-                schedule = _retry_schedule(status) if status else _BACKOFF_5XX
-                if _is_fuse_failure(e):
-                    await self._circuit.record_failure()
-                if isinstance(e, (openai.AuthenticationError, openai.PermissionDeniedError)):
-                    _obs_llm_error(_obs_started, e)  # §2.4 先记 error 再抛（配置错误不重试）
-                    logger.error("llm.auth_failed", error=str(e))
+                try:
+                    status = getattr(e, "status_code", None)
+                    schedule = _retry_schedule(status) if status else _BACKOFF_5XX
+                    if _is_fuse_failure(e):
+                        await self._circuit.record_failure()
+                    if isinstance(e, (openai.AuthenticationError, openai.PermissionDeniedError)):
+                        _obs_llm_error(_obs_started, e)  # §2.4 先记 error 再抛（配置错误不重试）
+                        logger.error("llm.auth_failed", error=str(e))
+                        raise
+                    if attempts >= len(schedule):
+                        _obs_llm_error(_obs_started, e)  # 重试耗尽：最终失败，先记 error 再抛
+                        raise
+                    delay = schedule[attempts]
+                    attempts += 1
+                    logger.warning("llm.retry", status=status, attempt=attempts, delay=delay, error=str(e))
+                    await asyncio.sleep(delay)
+                except (GeneratorExit, asyncio.CancelledError):
+                    # 退避等待期的第二条黑洞出口，机理与理由同 chat_stream 的同名守卫。
+                    _obs_llm_error(_obs_started, e)
                     raise
-                if attempts >= len(schedule):
-                    _obs_llm_error(_obs_started, e)  # 重试耗尽：最终失败，先记 error 再抛
-                    raise
-                delay = schedule[attempts]
-                attempts += 1
-                logger.warning("llm.retry", status=status, attempt=attempts, delay=delay, error=str(e))
-                await asyncio.sleep(delay)
 
     async def chat(
         self,
