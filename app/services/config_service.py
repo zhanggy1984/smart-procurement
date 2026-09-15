@@ -8,17 +8,17 @@ DB 被进程外改动的场景由 get_all 的 TTL 兜底 reload 补偿（solutio
 
 from __future__ import annotations
 
-import logging
 import time
 from typing import Optional
 
+import structlog
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import session_factory
 from app.models.system_config import SystemConfig
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger()
 
 # 缓存 TTL：超过后 get_all 触发一次全量 reload，防止进程外改库长期不感知
 _CACHE_TTL_SECONDS = 60.0
