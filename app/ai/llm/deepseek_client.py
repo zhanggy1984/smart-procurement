@@ -358,27 +358,44 @@ class DeepSeekClient:
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
-                await self._circuit.record_success()
-                _obs_llm_ok(_obs_started, resp.usage.model_dump() if getattr(resp, "usage", None) else None)
+                _obs_usage = resp.usage.model_dump() if getattr(resp, "usage", None) else None
+                try:
+                    await self._circuit.record_success()
+                except asyncio.CancelledError:
+                    # 取消窗口之一：响应已到手、取消落在 record_success 的 Lock acquire 上。本调用
+                    # 确实成功了 ⇒ 按 ok 落账再放行取消（否则成功调用零账面）。协程没有流式侧那条
+                    # GeneratorExit 出口，但「收口点前有 await 悬点」这件事同形。
+                    _obs_llm_ok(_obs_started, _obs_usage)
+                    raise
+                _obs_llm_ok(_obs_started, _obs_usage)
                 return resp.choices[0].message.content or ""
             except CircuitOpenError:
                 raise
             except Exception as e:  # noqa: BLE001
-                status = getattr(e, "status_code", None)
-                schedule = _retry_schedule(status) if status else _BACKOFF_5XX
-                if _is_fuse_failure(e):
-                    await self._circuit.record_failure()
-                if isinstance(e, (openai.AuthenticationError, openai.PermissionDeniedError)):
-                    _obs_llm_error(_obs_started, e)  # §2.4 先记 error 再抛（配置错误不重试）
-                    logger.error("llm.auth_failed", error=str(e))
+                try:
+                    status = getattr(e, "status_code", None)
+                    schedule = _retry_schedule(status) if status else _BACKOFF_5XX
+                    if _is_fuse_failure(e):
+                        await self._circuit.record_failure()
+                    if isinstance(e, (openai.AuthenticationError, openai.PermissionDeniedError)):
+                        _obs_llm_error(_obs_started, e)  # §2.4 先记 error 再抛（配置错误不重试）
+                        logger.error("llm.auth_failed", error=str(e))
+                        raise
+                    if attempts >= len(schedule):
+                        _obs_llm_error(_obs_started, e)  # 重试耗尽：最终失败，先记 error 再抛
+                        raise
+                    delay = schedule[attempts]
+                    attempts += 1
+                    logger.warning("llm.retry", status=status, attempt=attempts, delay=delay, error=str(e))
+                    await asyncio.sleep(delay)
+                except asyncio.CancelledError:
+                    # 取消窗口之二（宽窗）：退避等待期被取消——上游同为客户端断连（starlette 取消
+                    # 请求任务），悬点在 record_failure / sleep（退避 0.5~4s）。处理器内抛出的异常
+                    # **不被兄弟 except 子句接住**（兄弟子句只覆盖 try 体）⇒ 直接冲出函数：既无 ok
+                    # 也无 error，整条 llm_call 静默消失（record_failure 已先记 ⇒ 账目半截）。按
+                    # 「最后一次失败」记 error——本调用一次都没成功，记 ok 是假成功。
+                    _obs_llm_error(_obs_started, e)
                     raise
-                if attempts >= len(schedule):
-                    _obs_llm_error(_obs_started, e)  # 重试耗尽：最终失败，先记 error 再抛
-                    raise
-                delay = schedule[attempts]
-                attempts += 1
-                logger.warning("llm.retry", status=status, attempt=attempts, delay=delay, error=str(e))
-                await asyncio.sleep(delay)
 
     @property
     def circuit_state(self) -> str:

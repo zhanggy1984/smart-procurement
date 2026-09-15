@@ -680,6 +680,88 @@ async def test_chat_disabled_no_recording(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_chat_ok_recorded_when_cancelled_on_record_success(monkeypatch):
+    """chat 取消窗口之一（窄窗）：响应已到手、取消落在 record_success 的 Lock 上 ⇒ 仍须记 ok。
+
+    成功收口点 `_obs_llm_ok` 排在 `await self._circuit.record_success()` **之后** ⇒ 不补守卫时，
+    这条**已成功**的调用零账面。与流式侧「弃用丢 ok」同因，但出口机制不同：协程没有
+    `aclose()`/GeneratorExit 那条，只能由任务取消触发（本用例即该出口的单测复现）。
+    """
+    ok_mock, err_mock = _open_llm_gate(monkeypatch)
+    never = asyncio.Event()
+
+    class _SlowCircuit(_FakeCircuit):
+        async def record_success(self):
+            await never.wait()  # 永不返回 ⇒ 取消必然落在本 await 上
+
+    async def _create(**kw):
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="结论"))],
+            usage=_Usage(prompt_tokens=8, completion_tokens=3, total_tokens=11),
+        )
+
+    inst = _mk_instance(monkeypatch, _create)
+    inst._circuit = _SlowCircuit()
+    task = asyncio.create_task(
+        inst.chat([{"role": "user", "content": "q"}], temperature=0.3, max_tokens=2048)
+    )
+    for _ in range(5):  # 推进到 record_success 的 await
+        await asyncio.sleep(0)
+    assert not task.done(), "前提：生成确实停在 record_success，而非提前结束"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert ok_mock.call_count == 1, "调用已成功 ⇒ 取消不得让它零账面"
+    assert ok_mock.call_args.args[1] == \
+        {"prompt_tokens": 8, "completion_tokens": 3, "total_tokens": 11}
+    assert err_mock.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_chat_abandoned_during_retry_backoff_records_error(monkeypatch):
+    """chat 取消窗口之二（宽窗）：退避等待期被取消 ⇒ 仍须落一条 error。
+
+    与流式侧 `test_stream_abandoned_during_retry_backoff_records_error` 同形（同一段退避、同一段
+    sleep，窗口 0.5~4s）：处理器内抛出的异常不被兄弟 except 子句接住 ⇒ 直接冲出函数，既无 ok 也
+    无 error。**本处与上面「record_success 被取消」是两个独立悬点，必须各自驱动**——只驱动一处时，
+    删掉另一处的守卫全量仍全绿（本批在流式侧已踩过一次）。
+    """
+    ok_mock, err_mock = _open_llm_gate(monkeypatch)
+    first_err = _err(503)
+
+    async def _create(**kw):
+        raise first_err
+
+    _never = asyncio.Event()
+
+    class _FakeAsyncio:
+        # 同流式侧：桩替换 dc 模块内的 asyncio 引用，**必须把该模块还用到的属性一并代理**
+        # （dc 只用到 sleep 与 CancelledError 两个名字）。
+        CancelledError = asyncio.CancelledError
+
+        @staticmethod
+        async def sleep(_delay):
+            await _never.wait()  # 永不返回 ⇒ 停在退避等待处
+
+    monkeypatch.setattr(dc, "asyncio", _FakeAsyncio)
+    inst = _mk_instance(monkeypatch, _create)
+    task = asyncio.create_task(
+        inst.chat([{"role": "user", "content": "q"}], temperature=0.3, max_tokens=2048)
+    )
+    for _ in range(5):  # 推进到退避等待（create 抛错 → 取 schedule → sleep）
+        await asyncio.sleep(0)
+    assert not task.done(), "前提：确实停在退避等待，而非提前结束"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert ok_mock.call_count == 0, "本调用一次都没成功 ⇒ 记 ok 是假成功"
+    assert err_mock.call_count == 1, "退避期被取消仍须落一条账（否则整条 llm_call 消失）"
+    assert err_mock.call_args.args[1] is first_err, "按最后一次失败记 error"
+
+
+@pytest.mark.asyncio
 async def test_chat_stream_agent_ok_records_usage(monkeypatch):
     """chat_stream_agent：流末 usage → record_llm ok（agent 决策轮同走统一层出口）。"""
     ok_mock, err_mock = _open_llm_gate(monkeypatch)
