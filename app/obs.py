@@ -112,25 +112,24 @@ def _ms(started: float) -> int:
 
 
 def llm_error_type(exc: Exception) -> str:
-    """异常 → llm_call error_type（平台聚类用自由字符串，§2.5 全集 + 业务扩展）。
+    """异常 → llm_call error_type（平台错误分类白名单值域，**非自由字符串**）。
 
-    openai 异常自带 status_code → HTTP_{code} 优先（对齐 cs HTTP_xxx）；无状态码
-    （网络/超时层）按类名关键词归并；兜底 LLM_ERROR。CircuitOpenError（熔断前置拒绝）
+    openai 异常自带 status_code 时仅 429 单列（对应白名单 llm_rate_limit），其余码位
+    （含 auth/permission 类的 401/403）在白名单无对应词，统一归 llm_other——原始码值由
+    error_msg 保留。无状态码按类名关键词归并。CircuitOpenError（熔断前置拒绝）
     不打点，由 request HTTP_503 反映（对齐 cs：熔断拒绝非 LLM 调用）。
     """
     code = getattr(exc, "status_code", None)
     if code:
-        return f"HTTP_{code}"
+        return "llm_rate_limit" if code == 429 else "llm_other"
     name = type(exc).__name__.lower()
     if "timeout" in name:
-        return "TIMEOUT"
+        return "llm_timeout"
     if "connect" in name:
-        return "CONNECTION_ERROR"
+        return "llm_connection"
     if "rate" in name:
-        return "RATE_LIMIT"
-    if "auth" in name or "permission" in name:
-        return "AUTH_ERROR"
-    return "LLM_ERROR"
+        return "llm_rate_limit"
+    return "llm_other"
 
 
 def record_llm_ok(started: float, usage: Optional[dict] = None) -> None:

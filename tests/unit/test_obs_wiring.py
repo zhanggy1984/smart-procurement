@@ -4,8 +4,8 @@
 - obs() 门：三要素缺一 → None；齐备但包缺失 → None（边带不阻塞业务）；齐备+包在 → 返回 sdk
 - helper（begin/end/record_llm_ok/record_llm_error/init/shutdown）在门开时正确转发到 sdk、
   门关/未初始化时零动作、sdk 自身抛异常一律吞掉（观测边带不炸业务）
-- llm_error_type 分类：HTTP_{status_code} 优先，否则类名关键词（timeout/connect/rate/auth），
-  兜底 LLM_ERROR
+- llm_error_type 分类：仅 429 单列 llm_rate_limit，否则类名关键词（timeout/connect/rate），
+  其余（含 auth 类）统一 llm_other —— 全部落平台白名单值域
 - middleware：豁免路径不建 span；非豁免 ok/HTTP_{code}/CLIENT_DISCONNECT（body 迭代期收口、
   断连走 aborted）；call_next 抛异常 → UNHANDLED_EXCEPTION
 - deepseek_client 三方法 + conversation_service._summarize_with_llm 旁路：
@@ -192,7 +192,7 @@ def test_record_llm_error_default_classify(monkeypatch):
     fake = _open_gate(monkeypatch)
     started = obs_mod.llm_start()
     obs_mod.record_llm_error(started, ValueError("boom"))
-    assert fake.calls[0][3]["error_type"] == "LLM_ERROR"
+    assert fake.calls[0][3]["error_type"] == "llm_other"
 
 
 def test_helpers_swallow_sdk_exceptions(monkeypatch):
@@ -253,28 +253,28 @@ class _MyPermissionDeniedError(Exception):
 
 
 def test_llm_error_type_http_code_first():
-    """带 status_code 的异常 → HTTP_{code} 优先（对齐 cs HTTP_xxx，无论类名）。"""
+    """带 status_code 的异常 → 仅 429 单列 llm_rate_limit，其余码位统一 llm_other。"""
     e = _StatusErr("x")
     e.status_code = 429
-    assert obs_mod.llm_error_type(e) == "HTTP_429"
+    assert obs_mod.llm_error_type(e) == "llm_rate_limit"
     e.status_code = 401
-    assert obs_mod.llm_error_type(e) == "HTTP_401"
+    assert obs_mod.llm_error_type(e) == "llm_other"
     e.status_code = 503
-    assert obs_mod.llm_error_type(e) == "HTTP_503"
+    assert obs_mod.llm_error_type(e) == "llm_other"
 
 
 def test_llm_error_type_class_name_keywords():
-    """无 status_code → 按类名关键词归并。"""
-    assert obs_mod.llm_error_type(_MyTimeoutError("t")) == "TIMEOUT"
-    assert obs_mod.llm_error_type(_MyConnectionError("c")) == "CONNECTION_ERROR"
-    assert obs_mod.llm_error_type(_MyRateLimitError("r")) == "RATE_LIMIT"
-    assert obs_mod.llm_error_type(_MyAuthenticationError("a")) == "AUTH_ERROR"
-    assert obs_mod.llm_error_type(_MyPermissionDeniedError("p")) == "AUTH_ERROR"
+    """无 status_code → 按类名关键词归并（auth 类白名单无对应词，归 llm_other）。"""
+    assert obs_mod.llm_error_type(_MyTimeoutError("t")) == "llm_timeout"
+    assert obs_mod.llm_error_type(_MyConnectionError("c")) == "llm_connection"
+    assert obs_mod.llm_error_type(_MyRateLimitError("r")) == "llm_rate_limit"
+    assert obs_mod.llm_error_type(_MyAuthenticationError("a")) == "llm_other"
+    assert obs_mod.llm_error_type(_MyPermissionDeniedError("p")) == "llm_other"
 
 
 def test_llm_error_type_fallback():
-    """无 status_code 且类名无关键词 → LLM_ERROR 兜底。"""
-    assert obs_mod.llm_error_type(ValueError("boom")) == "LLM_ERROR"
+    """无 status_code 且类名无关键词 → llm_other 兜底（白名单内）。"""
+    assert obs_mod.llm_error_type(ValueError("boom")) == "llm_other"
 
 
 # ==================== middleware._obs_finish / dispatch ====================
