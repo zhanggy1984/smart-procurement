@@ -15,7 +15,7 @@ import time
 from typing import Optional
 
 import structlog
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -197,9 +197,27 @@ async def ai_status(
     }
 
 
+async def _obs_input_for(session, review_id: str, question: Optional[str] = None) -> dict:
+    """观测入参现场：平台据此算 root_input_hash（环③ 建簇键，为空则该错误行不建簇）。
+
+    **不含 review_id**：每次新建评审 id 都不同，纳入会让同一问题的复发 hash 分散、
+    聚类退化成「一错一簇」。bid/dimension 由评审记录反查——offline 把它当评测用例入参
+    复现时，prepare 阶段正需要这两个值。
+    """
+    payload: dict = {}
+    if question is not None:
+        payload["question"] = question
+    review = await session.get(svc.ExpertReview, review_id)
+    if review is not None:
+        payload["bid_id"] = review.bid_id
+        payload["dimension_id"] = review.dimension_id
+    return payload
+
+
 @router.post("/reviews/{review_id}/score", summary="SSE 流式评分（报价走公式）")
 async def stream_score(
     review_id: str,
+    request: Request,
     x_idempotency_key: Optional[str] = Header(None),
     last_event_id: Optional[str] = Header(None, alias="Last-Event-ID"),
     session: AsyncSession = Depends(get_db_session),
@@ -214,6 +232,8 @@ async def stream_score(
             detail="AI 推理引擎暂不可用（断路器 OPEN），请切换人工评审",
         )
     expert_id = await _resolve_expert(session, user)
+    # 同上：评分流无请求体，入参现场只能由 path 上的 review_id 反查评审记录得到
+    request.state.obs_input = await _obs_input_for(session, review_id)
 
     async def gen():
         # 断流续推：Last-Event-ID → 从缓存补发 seq 之后的帧；缓存过期 → event:reset
@@ -251,6 +271,7 @@ async def stream_score(
 async def stream_chat(
     review_id: str,
     body: ChatRequest,
+    request: Request,
     session: AsyncSession = Depends(get_db_session),
     user: User = Depends(require_roles(Role.REVIEW_EXPERT, Role.ADMIN)),
 ) -> StreamingResponse:
@@ -261,6 +282,9 @@ async def stream_chat(
             detail="AI 推理引擎暂不可用（断路器 OPEN），请切换人工评审",
         )
     expert_id = await _resolve_expert(session, user)
+    # 观测入参现场：写在此处而非 gen 内——gen 惰性，写在里面则中间件收口（body 迭代完成后）
+    # 时 request.state 仍无值。chat 有请求体，故带上 question。
+    request.state.obs_input = await _obs_input_for(session, review_id, body.question)
 
     async def gen():
         seq = 1

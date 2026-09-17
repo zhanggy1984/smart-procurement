@@ -147,15 +147,19 @@ def test_begin_request_noop_when_closed(monkeypatch):
 
 
 def test_end_request_ok_when_open(monkeypatch):
-    """门开 → end_request ok 透传；error_type/error_msg 随 error 透传。
+    """门开 → end_request ok 透传；error_type/error_msg/input 随调用透传。
 
-    app.obs.end_request 恒把 error_type/error_msg 两 kwarg 传给 sdk（ok 时二者为 None）。
+    app.obs.end_request 恒把这三个 kwarg 传给 sdk（未给时为 None）——`input` 即入参现场，
+    平台据此算 root_input_hash（环③ 建簇键）。
     """
     fake = _open_gate(monkeypatch)
     obs_mod.end_request("ok")
-    obs_mod.end_request("error", error_type="HTTP_503", error_msg="上游熔断")
-    assert fake.calls == [("end_request", "ok", {"error_type": None, "error_msg": None}),
-                          ("end_request", "error", {"error_type": "HTTP_503", "error_msg": "上游熔断"})]
+    obs_mod.end_request("error", error_type="HTTP_503", error_msg="上游熔断",
+                        obs_input={"question": "q"})
+    assert fake.calls == [
+        ("end_request", "ok", {"error_type": None, "error_msg": None, "input": None}),
+        ("end_request", "error", {"error_type": "HTTP_503", "error_msg": "上游熔断",
+                                  "input": {"question": "q"}})]
 
 
 def test_end_request_noop_when_closed(monkeypatch):
@@ -292,19 +296,27 @@ def _obs_end_recorder(monkeypatch):
 
 
 def test_obs_finish_mapping(monkeypatch):
-    """_obs_finish：断连 > LLM 硬失败 > HTTP_{code} > ok（仿 cs _obs_end）。"""
+    """_obs_finish：断连 > LLM 硬失败 > HTTP_{code} > ok（仿 cs _obs_end）。
+
+    末行覆盖入参现场透传：`obs_input` 必须在**每个**出口原样交给 obs_end（环③ 建簇键，
+    四出口里漏传任一个 = 该出口的错误建不出簇，且漏传在外部表现为「没数据」而非报错）。
+    """
     calls = _obs_end_recorder(monkeypatch)
     mw._obs_finish(SimpleNamespace(status_code=200))
     mw._obs_finish(SimpleNamespace(status_code=503))
     mw._obs_finish(SimpleNamespace(status_code=200), aborted=True)
     mw._obs_finish(SimpleNamespace(status_code=200),
                    health={"hard_fail": True, "error_type": "llm_timeout"})
+    mw._obs_finish(SimpleNamespace(status_code=200), obs_input={"question": "q"})
     assert calls == [
-        ("ok", {}),
-        ("error", {"error_type": "HTTP_503"}),
-        ("error", {"error_type": "CLIENT_DISCONNECT", "error_msg": "客户端连接中断"}),
+        ("ok", {"obs_input": None}),
+        ("error", {"error_type": "HTTP_503", "obs_input": None}),
+        ("error", {"error_type": "CLIENT_DISCONNECT", "error_msg": "客户端连接中断",
+                   "obs_input": None}),
         ("error", {"error_type": "llm_timeout",
-                   "error_msg": "LLM 调用失败，用户本轮未拿到正常回答"}),
+                   "error_msg": "LLM 调用失败，用户本轮未拿到正常回答",
+                   "obs_input": None}),
+        ("ok", {"obs_input": {"question": "q"}}),
     ]
 
 
@@ -358,7 +370,7 @@ async def test_middleware_plain_ok_roundtrip(monkeypatch):
 
     resp = await inst.dispatch(_make_request("/api/v1/reviews/1", rid="rid-abc"), _call_next)
     assert begun == [{"method": "GET", "path": "/api/v1/reviews/1", "trace_id": "rid-abc"}]
-    assert calls == [("ok", {})]
+    assert calls == [("ok", {"obs_input": None})]
     assert resp.headers["X-Request-ID"] == "rid-abc"
 
 
@@ -381,7 +393,7 @@ async def test_middleware_streaming_end_after_body(monkeypatch):
     assert begun and calls == []  # dispatch 返回时 body 未消费 → 未收口
     body = b"".join([c async for c in resp.body_iterator])
     assert body == b"chunk1chunk2"
-    assert calls == [("ok", {})]
+    assert calls == [("ok", {"obs_input": None})]
 
 
 @pytest.mark.asyncio
@@ -405,7 +417,7 @@ async def test_middleware_streaming_abort_disconnect(monkeypatch):
         async for _ in resp.body_iterator:
             pass
     assert calls == [("error", {"error_type": "CLIENT_DISCONNECT",
-                                "error_msg": "客户端连接中断"})]
+                                "error_msg": "客户端连接中断", "obs_input": None})]
 
 
 @pytest.mark.asyncio

@@ -28,7 +28,8 @@ from app.obs import (
 logger = structlog.get_logger(__name__)
 
 
-def _obs_finish(response, aborted: bool = False, health: dict | None = None) -> None:
+def _obs_finish(response, aborted: bool = False, health: dict | None = None,
+                obs_input: dict | None = None) -> None:
     """request 出口统一收口：断连 > LLM 硬失败 > HTTP 状态码 > ok（仿 cs _obs_end）。
 
     SSE 客户端中途断开（body 迭代抛 BaseException）→ CLIENT_DISCONNECT；非 2xx →
@@ -41,17 +42,18 @@ def _obs_finish(response, aborted: bool = False, health: dict | None = None) -> 
     发生在 dispatch 返回之后，重取拿不到请求上下文（gq 侧同一理由）。
     """
     if aborted:
-        obs_end("error", error_type="CLIENT_DISCONNECT", error_msg="客户端连接中断")
+        obs_end("error", error_type="CLIENT_DISCONNECT", error_msg="客户端连接中断",
+                obs_input=obs_input)
         return
     if health and health["hard_fail"]:
         obs_end("error", error_type=health["error_type"],
-                error_msg="LLM 调用失败，用户本轮未拿到正常回答")
+                error_msg="LLM 调用失败，用户本轮未拿到正常回答", obs_input=obs_input)
         return
     code = response.status_code
     if code >= 400:
-        obs_end("error", error_type=f"HTTP_{code}")
+        obs_end("error", error_type=f"HTTP_{code}", obs_input=obs_input)
         return
-    obs_end("ok")
+    obs_end("ok", obs_input=obs_input)
 
 
 class RequestIDMiddleware(BaseHTTPMiddleware):
@@ -78,6 +80,10 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
                     obs_end("error", error_type="UNHANDLED_EXCEPTION",
                             error_msg="请求处理抛异常未达响应")
                 raise
+            # 入参现场由路由在请求处理期写入 request.state（与路由同 scope）。取在此处：
+            # call_next 返回时下游已执行完，而 SSE 路由是在返回 StreamingResponse 前写入的
+            # （gen 惰性，写在其内则取不到），故此刻必已就绪。
+            obs_input = getattr(request.state, "obs_input", None)
             if not exempt:
                 # 流式响应：body 迭代完成后才收口——SSE 的 LLM 调用发生在 response body
                 # 发送期（call_next 返回时尚未开始），若即时 end 则 request duration≈0 且
@@ -85,7 +91,7 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
                 body_iter = getattr(response, "body_iterator", None)
                 if body_iter is None:
                     # 非流式响应体已整体生成：直接收口（status_code 即可判定）
-                    _obs_finish(response, health=health)
+                    _obs_finish(response, health=health, obs_input=obs_input)
                 else:
                     async def _body_with_obs():
                         try:
@@ -93,10 +99,11 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
                                 yield chunk
                         except BaseException:
                             # 客户端断连（CancelledError/httpx 断开等）：trace 如实反映未拿完整响应
-                            _obs_finish(response, aborted=True, health=health)
+                            _obs_finish(response, aborted=True, health=health,
+                                        obs_input=obs_input)
                             raise
                         else:
-                            _obs_finish(response, health=health)
+                            _obs_finish(response, health=health, obs_input=obs_input)
 
                     response.body_iterator = _body_with_obs()
         finally:

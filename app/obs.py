@@ -128,19 +128,25 @@ def mark_llm_hard_fail_from_exc(exc: Exception) -> None:
 
 
 def end_request(status: str, *, error_type: Optional[str] = None,
-                error_msg: Optional[str] = None) -> None:
+                error_msg: Optional[str] = None,
+                obs_input: Optional[dict] = None) -> None:
     """request 出口（中间件收口：ok / HTTP_{code} / CLIENT_DISCONNECT）。
 
-    ⚠️ 只传**镜像内 sdk 确定支持**的形参：sp 镜像烤入的 obs_sdk 是旧版
-    （无 `input`/不含新参数），多传一个 kwarg 会抛 TypeError 并被下面的兜底
-    吞成 debug 日志 ⇒ **一条 request 事件都不产出**（root 恒不到，全 agent 观测哑掉）。
-    环③ 入参透传依赖 sdk 新能力，须**先重建镜像**再开，见 sp-seven-ring-plan.md。
+    `obs_input` = 本请求入参现场，平台据此算 root_input_hash（环③ 建簇键，为空则该行
+    不建簇：cluster_job 的 Fork A）。形参名不用 `input` 以避开内置名遮蔽，透传时映射。
+
+    ⚠️ 该 kwarg **依赖镜像内 obs_sdk 支持**：历史 sp 镜像烤入的是旧版（无 `input`），
+    多传一个 kwarg 抛 TypeError 且被下面兜底吞成 debug ⇒ **一条 request 事件都不产出**
+    （root 恒不到，全 agent 观测哑掉）。2026-09-17 已重建镜像（obs_sdk 0.1.2）并核过
+    容器内签名；**再动此处前先 `docker exec sp-app python -c "import inspect, obs_sdk;
+    print(inspect.signature(obs_sdk.end_request))"` 确认形参仍在**（读容器，不读宿主源码）。
     """
     sdk = obs()
     if sdk is None:
         return
     try:
-        sdk.end_request(status, error_type=error_type, error_msg=error_msg)
+        sdk.end_request(status, error_type=error_type, error_msg=error_msg,
+                        input=obs_input)
     except Exception:
         logger.debug("[obs] end_request 异常 status=%s", status, exc_info=True)
 

@@ -147,24 +147,29 @@ def test_mark_without_context_is_loud(caplog):
         "置位丢失必须 fail-loud，否则表现为「trace 记 ok」而无人察觉"
 
 
-def test_end_request_passes_only_supported_kwargs(monkeypatch):
-    """出口只传**镜像内 sdk 确定支持**的形参。
+def test_end_request_maps_obs_input_to_sdk(monkeypatch):
+    """出口把入参现场映射为 sdk 的 `input=`（环③ 建簇键；为空则该行不建簇）。
 
-    回归锁：曾因多传 `input=` 抛 TypeError 被 app.obs 的兜底吞成 debug 日志
-    ⇒ 一条 request 事件都不产出（root 恒不到）。本用例按旧版 sdk 的签名（无 input）
-    起桩，多传任何 kwarg 都会 TypeError ⇒ 转红。
+    回归锁按**当前镜像内 sdk**（obs_sdk 0.1.2，含 input）起**严格签名**桩：形参名对不上
+    或新增 kwarg 都是 TypeError ⇒ 被 app.obs 的兜底吞成 debug 日志、一条 request 事件都
+    不产出（外部表现为「平台没消费」而非报错），故出参面必须锁死。
+
+    ⚠️ 本用例覆盖不到的边界：容器内 sdk 是否仍含 input **须真机核**
+    （`docker exec sp-app python -c "import inspect, obs_sdk; print(inspect.signature(obs_sdk.end_request))"`）
+    —— 单测的假 sdk 是自己写的，证明不了镜像。2026-09-17 重建镜像时已核过。
     """
     seen = {}
 
-    class _OldSdk:
-        # 旧版镜像签名：无 input
-        def end_request(self, status, *, error_type=None, error_msg=None):
-            seen.update(status=status, error_type=error_type)
+    class _Sdk:
+        # 当前镜像签名：除这三个 kwarg 外不接受任何入参
+        def end_request(self, status, *, error_type=None, error_msg=None, input=None):
+            seen.update(status=status, error_type=error_type, input=input)
 
-    monkeypatch.setattr(obs_mod, "obs", lambda: _OldSdk())
-    obs_mod.end_request("error", error_type="llm_timeout")
+    monkeypatch.setattr(obs_mod, "obs", lambda: _Sdk())
+    obs_mod.end_request("error", error_type="llm_timeout", obs_input={"question": "q"})
 
-    assert seen == {"status": "error", "error_type": "llm_timeout"}
+    assert seen == {"status": "error", "error_type": "llm_timeout",
+                    "input": {"question": "q"}}
 
 
 class _FakeEndSdk:
