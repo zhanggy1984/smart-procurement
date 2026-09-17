@@ -70,6 +70,19 @@ class _CircuitBreaker:
         self._open_until = 0.0
         self._lock = asyncio.Lock()
 
+    def _maybe_half_open(self) -> None:
+        """OPEN 已到期 → 迁 HALF_OPEN（同步、无 await，单事件循环下赋值即原子）。
+
+        为什么单独抽出来给 `state` 用（2026-09-17 修复）：`reviews.py:229/:279` 在
+        **`acquire()` 之前**就判 `circuit_state == "OPEN"` 并直接 503 ⇒ 若迁移只发生在
+        `acquire()` 内，reviews 这条链**永远走不到迁移**，到期自愈从不发生（实测黑洞注入后
+        4 分钟内多次重试全 503，直到 `docker restart`）。`state` 是路由唯一读到的面，
+        让它也参与到期迁移，路由门才能在窗口过后自行放行——**单一真相源仍在本类内**。
+        """
+        if self._state == CIRCUIT_OPEN and time.monotonic() >= self._open_until:
+            self._state = CIRCUIT_HALF_OPEN
+            logger.info("circuit.half_open")
+
     async def acquire(self) -> None:
         """调用前检查。OPEN 未到期 → 抛 CircuitOpenError；到期 → 转 HALF_OPEN 放行。
 
@@ -79,9 +92,7 @@ class _CircuitBreaker:
         async with self._lock:
             if self._state == CIRCUIT_OPEN and time.monotonic() < self._open_until:
                 raise CircuitOpenError("AI 服务熔断中（断路器 OPEN），请稍后重试")
-            if self._state == CIRCUIT_OPEN and time.monotonic() >= self._open_until:
-                self._state = CIRCUIT_HALF_OPEN
-                logger.info("circuit.half_open")
+            self._maybe_half_open()
 
     async def record_failure(self) -> None:
         """失败计数；达到阈值 → OPEN 熔断。HALF_OPEN 探测失败 → 重回 OPEN。"""
@@ -105,6 +116,12 @@ class _CircuitBreaker:
 
     @property
     def state(self) -> str:
+        """当前状态。**读取即参与到期迁移**（见 `_maybe_half_open` 的 why）。
+
+        刻意带副作用：这是路由层判断「要不要 503」的唯一读面，若这里不迁移，
+        OPEN 到期后没有任何路径能把状态推到 HALF_OPEN，自愈形同虚设。
+        """
+        self._maybe_half_open()
         return self._state
 
 

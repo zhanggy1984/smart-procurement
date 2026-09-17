@@ -454,6 +454,12 @@
 | 全部 chunk IP<0.5 | 用无关 query 检索 | 返回"未找到与该问题相关的依据" |
 | 断路器半开探测 | 连续成功 1 次 | 断路器自动 CLOSE，AI 功能恢复 |
 
+> **⚠️ 上表末行（半开探测）2026-09-17 结清 —— 该验收项当时是「不可达」的**：本行为**规格承诺**（自动恢复），但 `api/v1/reviews.py` 在 `acquire()` **之前**就判 `circuit_state == "OPEN"` 并直接 503 ⇒ reviews 这条链**永远走不到** `_CircuitBreaker.acquire()` 内的到期迁移 ⇒ 「自动 CLOSE」在真机上从不发生（黑洞注入后 4 分钟内重试**全 503**，直到 `docker restart`）。
+> - **为什么此前没被发现**：当时的覆盖是「直接调 `cb.acquire()` 的单测」+「把 `circuit_state` 写死成 `OPEN`/`CLOSED` 的 MagicMock 集成用例」—— **两者都绕过了那道让它不可达的门**，所以它们**无论自愈是否真的生效都照样绿**。
+> - **处置（已修，代码在 `app/ai/llm/deepseek_client.py`）**：抽出同步 `_maybe_half_open()`，由 `acquire()` **与 `state` 属性**共同调用；路由读到的面因此也会到期迁移，门能在窗口过后自行放行。**单一真相源仍留在 `_CircuitBreaker` 内**，未把到期判断复制进路由。
+> - **验证**：新增**经过路由**的用例 `tests/integration/test_degradation_api.py::test_circuit_self_heals_after_window_through_route`；`tests/unit` **378 passed**、`test_degradation_api.py` **6 passed**。判别力对照：把 `state` 改回纯读 ⇒ 新用例**转红**（且先 `grep -c` 确认替换确实改了文本，防「变异是空操作、报绿是假绿」），已还原。
+> - **未验**：**镜像未重建**，容器内仍是旧码，真机行为**未复验**。
+
 - pytest + httpx AsyncClient + 指向本地 Docker Compose 环境
 - **验收**：20 个 API × 22+ 条错误路径全部通过，跨存储一致性 6 场景通过，降级路径 7 场景通过
 
