@@ -27,6 +27,7 @@ from app.core.config import settings
 from app.obs import (
     llm_start as _obs_llm_start,
     record_llm_error as _obs_llm_error,
+    mark_llm_hard_fail_from_exc as _obs_mark_fail,
     record_llm_ok as _obs_llm_ok,
 )
 from app.services import config_service
@@ -201,10 +202,15 @@ class DeepSeekClient:
                         await self._circuit.record_failure()
                     if isinstance(e, (openai.AuthenticationError, openai.PermissionDeniedError)):
                         _obs_llm_error(_obs_started, e)  # §2.4 先记 error 再抛（配置错误不重试）
+                        # 置请求级硬失败标记：本异常终将抛到业务层被吞成降级/error 帧，
+                        # 出口只看到 HTTP 200 ⇒ 不置位平台按「故障已吸收」切掉回流候选
+                        _obs_mark_fail(e)
                         logger.error("llm.auth_failed", error=str(e))
                         raise
                     if attempts >= len(schedule):
                         _obs_llm_error(_obs_started, e)  # 重试耗尽：最终失败，先记 error 再抛
+                        # 同上：重试已耗尽 ⇒ 本轮确定没有 LLM 结果，置位（每请求只取首次）
+                        _obs_mark_fail(e)
                         raise
                     delay = schedule[attempts]
                     attempts += 1
@@ -316,10 +322,15 @@ class DeepSeekClient:
                         await self._circuit.record_failure()
                     if isinstance(e, (openai.AuthenticationError, openai.PermissionDeniedError)):
                         _obs_llm_error(_obs_started, e)  # §2.4 先记 error 再抛（配置错误不重试）
+                        # 置请求级硬失败标记：本异常终将抛到业务层被吞成降级/error 帧，
+                        # 出口只看到 HTTP 200 ⇒ 不置位平台按「故障已吸收」切掉回流候选
+                        _obs_mark_fail(e)
                         logger.error("llm.auth_failed", error=str(e))
                         raise
                     if attempts >= len(schedule):
                         _obs_llm_error(_obs_started, e)  # 重试耗尽：最终失败，先记 error 再抛
+                        # 同上：重试已耗尽 ⇒ 本轮确定没有 LLM 结果，置位（每请求只取首次）
+                        _obs_mark_fail(e)
                         raise
                     delay = schedule[attempts]
                     attempts += 1
@@ -379,10 +390,15 @@ class DeepSeekClient:
                         await self._circuit.record_failure()
                     if isinstance(e, (openai.AuthenticationError, openai.PermissionDeniedError)):
                         _obs_llm_error(_obs_started, e)  # §2.4 先记 error 再抛（配置错误不重试）
+                        # 置请求级硬失败标记：本异常终将抛到业务层被吞成降级/error 帧，
+                        # 出口只看到 HTTP 200 ⇒ 不置位平台按「故障已吸收」切掉回流候选
+                        _obs_mark_fail(e)
                         logger.error("llm.auth_failed", error=str(e))
                         raise
                     if attempts >= len(schedule):
                         _obs_llm_error(_obs_started, e)  # 重试耗尽：最终失败，先记 error 再抛
+                        # 同上：重试已耗尽 ⇒ 本轮确定没有 LLM 结果，置位（每请求只取首次）
+                        _obs_mark_fail(e)
                         raise
                     delay = schedule[attempts]
                     attempts += 1

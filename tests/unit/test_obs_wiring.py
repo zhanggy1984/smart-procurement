@@ -292,14 +292,20 @@ def _obs_end_recorder(monkeypatch):
 
 
 def test_obs_finish_mapping(monkeypatch):
-    """_obs_finish：aborted > HTTP_{code} > ok（仿 cs _obs_end）。"""
+    """_obs_finish：断连 > LLM 硬失败 > HTTP_{code} > ok（仿 cs _obs_end）。"""
     calls = _obs_end_recorder(monkeypatch)
     mw._obs_finish(SimpleNamespace(status_code=200))
     mw._obs_finish(SimpleNamespace(status_code=503))
     mw._obs_finish(SimpleNamespace(status_code=200), aborted=True)
-    assert calls == [("ok", {}),
-                     ("error", {"error_type": "HTTP_503"}),
-                     ("error", {"error_type": "CLIENT_DISCONNECT", "error_msg": "客户端连接中断"})]
+    mw._obs_finish(SimpleNamespace(status_code=200),
+                   health={"hard_fail": True, "error_type": "llm_timeout"})
+    assert calls == [
+        ("ok", {}),
+        ("error", {"error_type": "HTTP_503"}),
+        ("error", {"error_type": "CLIENT_DISCONNECT", "error_msg": "客户端连接中断"}),
+        ("error", {"error_type": "llm_timeout",
+                   "error_msg": "LLM 调用失败，用户本轮未拿到正常回答"}),
+    ]
 
 
 def _make_request(path: str, rid: str | None = None) -> Request:
@@ -398,7 +404,8 @@ async def test_middleware_streaming_abort_disconnect(monkeypatch):
     with pytest.raises(RuntimeError):
         async for _ in resp.body_iterator:
             pass
-    assert calls == [("error", {"error_type": "CLIENT_DISCONNECT", "error_msg": "客户端连接中断"})]
+    assert calls == [("error", {"error_type": "CLIENT_DISCONNECT",
+                                "error_msg": "客户端连接中断"})]
 
 
 @pytest.mark.asyncio

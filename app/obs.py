@@ -11,6 +11,7 @@ Handler 收不到 → 日志走 SDK 的 structlog processor（`obs_sdk.structlog
 """
 from __future__ import annotations
 
+import contextvars
 import logging
 import time
 from typing import Optional
@@ -90,9 +91,51 @@ def begin_request(*, method: str, path: str, trace_id: Optional[str] = None) -> 
         return False
 
 
+# 请求级 LLM 健康标记与观测入参：中间件建请求上下文时置一个**可变 dict**，下游失败出口
+# 就地改它。持 dict 而非标量——contextvar 的写在子任务上下文里发生，标量赋值传不回中间件；
+# dict 按引用跨 context 拷贝共享，故子任务写入对入口可见。业务侧拿不到 request 对象
+# （sp 两个 SSE 路由均无 request 形参），这是唯一可用的载体。
+llm_health_var: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar(
+    "llm_health", default=None
+)
+
+
+def mark_llm_hard_fail(error_type: str) -> None:
+    """记「本轮最终没拿到 LLM 结果」，由请求出口据此记 root=error。
+
+    SSE 接口恒返 200：LLM 异常被业务吞成 error 帧后生成器正常结束，出口只看到 200，
+    平台会按「故障已被业务吸收」把回流候选切掉（环② 断）。故失败出口须在业务侧置位。
+
+    一轮内多次硬失败只取首次（先发生的更具代表性）。上下文缺失（后台任务/中间件未按序
+    置入）时**打日志暴露**而不是静默返回——静默的后果与不实现本机制相同（trace 记 ok），
+    必须能被发现；且只记日志、不抛异常，观测边带故障不拦业务。
+    """
+    health = llm_health_var.get()
+    if health is None:
+        logger.error(
+            "[obs] llm_health 上下文缺失，LLM 硬失败标记丢失（error_type=%s）；"
+            "生产出现即中间件未按序置入 context", error_type,
+        )
+        return
+    if not health["hard_fail"]:
+        health["hard_fail"] = True
+        health["error_type"] = error_type
+
+
+def mark_llm_hard_fail_from_exc(exc: Exception) -> None:
+    """按异常分型置位（error_type 复用平台白名单分类器，不引入新词）。"""
+    mark_llm_hard_fail(llm_error_type(exc))
+
+
 def end_request(status: str, *, error_type: Optional[str] = None,
                 error_msg: Optional[str] = None) -> None:
-    """request 出口（中间件收口：ok / HTTP_{code} / CLIENT_DISCONNECT）。"""
+    """request 出口（中间件收口：ok / HTTP_{code} / CLIENT_DISCONNECT）。
+
+    ⚠️ 只传**镜像内 sdk 确定支持**的形参：sp 镜像烤入的 obs_sdk 是旧版
+    （无 `input`/不含新参数），多传一个 kwarg 会抛 TypeError 并被下面的兜底
+    吞成 debug 日志 ⇒ **一条 request 事件都不产出**（root 恒不到，全 agent 观测哑掉）。
+    环③ 入参透传依赖 sdk 新能力，须**先重建镜像**再开，见 sp-seven-ring-plan.md。
+    """
     sdk = obs()
     if sdk is None:
         return
