@@ -21,6 +21,7 @@ from app.core.config import settings
 from app.core.crypto import is_fernet_key_secure
 from app.core.errors import is_dependency_error
 from app.core.middleware import RequestIDMiddleware
+from app.obs import init_obs, shutdown_obs
 from app.services import config_service
 
 logger = structlog.get_logger(__name__)
@@ -117,9 +118,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         print(f"[startup] 系统配置加载跳过: {e}")
 
+    # obs_sdk 装配（观测边带，§11.3 sp #1）：structlog processor 已由 setup_logging 插链，
+    # init 只起 Sink 线程；失败仅告警不拦启动（OBS_* 缺配 = init 内部直接返回）。
+    init_obs()
+
     yield
 
     # 关闭清理
+    shutdown_obs()
     await database.dispose_engine()
     await neo4j.close_driver()
     milvus.disconnect()

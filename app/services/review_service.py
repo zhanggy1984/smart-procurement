@@ -34,6 +34,7 @@ from app.models.expert_review import ExpertReview, ReviewStatus
 from app.models.lot_expert_assignment import LotExpertAssignment
 from app.models.project import Lot, ScoringCriterion, ScoringDimension
 from app.models.supplier import Supplier
+from app.obs import mark_llm_hard_fail_from_exc as _obs_mark_fail
 
 logger = structlog.get_logger(__name__)
 
@@ -413,7 +414,10 @@ async def stream_score(
                 full_text += piece
                 yield emit("answer", {"delta": piece})
                 yield emit("thought", {"delta": piece})
-    except CircuitOpenError:
+    except CircuitOpenError as e:
+        # 降级出口：账面全干净（thinking+usage+done 齐、无 error 帧），出口只看到 200，
+        # 不置位则平台按「故障已吸收」切掉回流候选。评分未产出 = 本轮确实没拿到结果
+        _obs_mark_fail(e)
         yield emit("thinking", {"stage": "LLM_DOWN"})
         yield emit("usage", total_usage)
         yield emit("done", {"content": full_text})

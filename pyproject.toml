@@ -95,3 +95,8 @@ markers = [
 # 统一标记 session loop_scope（pytest-asyncio 0.24 仅支持 fixture_loop_scope
 # ini 项，测试函数 loop 需 hook 控制）。
 testpaths = ["tests"]
+# 日志级别钉在 INFO：logging 默认根级别 WARNING 会让 `logger.info(...)` 提前短路
+# （`isEnabledFor` 为假 ⇒ `_log` 不被调用），把「标准库 logger 误用 kwargs」这类
+# 写法错的 TypeError 静默吞掉 —— T-3.19 的两处调用即因此长期未被发现。
+# 钉 INFO 后测试与生产（`setup_logging` 默认 INFO）同级。
+log_level = "INFO"

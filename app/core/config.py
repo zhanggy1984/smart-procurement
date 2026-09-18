@@ -97,6 +97,20 @@ class Settings(BaseSettings):
     fraud_auto_pass_threshold: float = 25
     fraud_critical_threshold: float = 75
 
+    # ========== 观测上报 obs_sdk（§11.3 接入；缺开关/地址/主题任一项 = 完全关闭，业务零侵入） ==========
+    obs_enabled: bool = False
+    obs_kafka_servers: str = ""
+    obs_kafka_topic: str = ""
+    obs_kafka_sasl_username: str = ""
+    obs_kafka_sasl_password: str = ""
+    obs_flush_batch: int = 500
+    obs_flush_interval_s: float = 2.0
+
+    @property
+    def obs_ready(self) -> bool:
+        """观测三要素齐备才视为启用（防半配误开）。"""
+        return bool(self.obs_enabled and self.obs_kafka_servers and self.obs_kafka_topic)
+
     @property
     def database_url(self) -> str:
         """SQLAlchemy async 连接串。显式 MYSQL_URL 优先，否则按分项拼接。"""

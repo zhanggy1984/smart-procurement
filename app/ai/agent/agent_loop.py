@@ -52,6 +52,7 @@ from app.ai.llm.prompts import ThinkingAnswerSplitter, build_chat_prompt
 from app.models.bid_document import BidDocument
 from app.models.conversation import ConversationMessage
 from app.models.project import ScoringDimension
+from app.obs import mark_llm_hard_fail_from_exc as _obs_mark_fail
 from app.services import conversation_service as conversation
 from app.services.review_service import ExpertReview
 
@@ -197,7 +198,10 @@ async def stream_agent(
                 tool_calls = calls[:1] if calls else None
             elif t == "content":
                 round1_content += ev["delta"]
-    except CircuitOpenError:
+    except CircuitOpenError as e:
+        # 熔断拒绝发生在 deepseek_client 重试环之外（acquire 前置），不经 §2.4「先记再抛」
+        # 那两处置位 ⇒ 出口只看到 HTTP 200 + error 帧，须在此补置硬失败标记
+        _obs_mark_fail(e)
         yield {"type": "error", "message": "AI 服务不可用，请稍后重试"}
         return
     except Exception as e:
