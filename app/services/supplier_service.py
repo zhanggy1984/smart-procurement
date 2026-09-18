@@ -379,12 +379,12 @@ async def update_status(
     supplier.status = new_status
     supplier.updated_at = now
 
-    # 登录账号同步禁用/启用（供应商账号按 username 前缀约定关联，仅禁用不查实体）
-    if new_status == SupplierStatus.INACTIVE:
-        user = await session.scalar(select(User).where(User.role == Role.SUPPLIER, User.display_name == supplier.name))
-        if user is not None:
-            user.is_active = False
-            user.updated_at = now
+    # 登录账号同步启用状态：仅 ACTIVE 可登录（与 expert_service.update_status 对称）
+    # 此前只禁不启 —— 拉黑禁用账号后，解除拉黑不会恢复，账号被永久锁死
+    user = await session.scalar(select(User).where(User.role == Role.SUPPLIER, User.display_name == supplier.name))
+    if user is not None:
+        user.is_active = new_status == SupplierStatus.ACTIVE
+        user.updated_at = now
 
     # 级联：拉黑触发、解除还原
     if new_blacklisted and not was_blacklisted:

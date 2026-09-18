@@ -155,6 +155,47 @@ async def test_update_status_unblacklist_restores():
 
 
 @pytest.mark.asyncio
+async def test_update_status_blacklist_disables_login_account():
+    """拉黑 → 同步禁用供应商登录账号。"""
+    session = AsyncMock()
+    supplier = MagicMock()
+    supplier.supplier_id = "SUP-1"
+    supplier.name = "甲科技"
+    supplier.blacklisted = False
+    user = MagicMock()
+    user.is_active = True
+    session.get.return_value = supplier
+    session.scalar.return_value = user
+    session.execute.return_value.all.return_value = []
+
+    with patch("app.services.supplier_service._cascade_blacklist", new=AsyncMock()), \
+         patch("app.services.supplier_service.write_outbox_event", new=AsyncMock()), \
+         patch("app.services.supplier_service._notify_blacklist", new=AsyncMock()), \
+         patch("app.services.supplier_service.neo4j_sync.upsert_supplier", new=AsyncMock()):
+        await update_status(session, "SUP-1", blacklisted=True, status=None, operator_id="U-1")
+    assert user.is_active is False
+
+
+@pytest.mark.asyncio
+async def test_update_status_unblacklist_enables_login_account():
+    """解除拉黑 → 恢复供应商登录账号（此前只禁不启，账号被永久锁死）。"""
+    session = AsyncMock()
+    supplier = MagicMock()
+    supplier.supplier_id = "SUP-1"
+    supplier.name = "甲科技"
+    supplier.blacklisted = True
+    user = MagicMock()
+    user.is_active = False
+    session.get.return_value = supplier
+    session.scalar.return_value = user
+
+    with patch("app.services.supplier_service._restore_suspended_reviews", new=AsyncMock()), \
+         patch("app.services.supplier_service.neo4j_sync.upsert_supplier", new=AsyncMock()):
+        await update_status(session, "SUP-1", blacklisted=False, status=None, operator_id="U-1")
+    assert user.is_active is True
+
+
+@pytest.mark.asyncio
 async def test_update_status_invalid_params():
     """status 与 blacklisted 都未传 / status 非法 → 422。"""
     session = AsyncMock()
