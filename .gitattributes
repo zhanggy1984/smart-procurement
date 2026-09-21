@@ -9,3 +9,9 @@
 *.sh text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+
+# 提示词模板（app/prompts/*.md）：不是给人读的文档，而是程序按字节读取、
+# 原样拼进 system 提示词送 LLM 的**程序输入**。CRLF 会静默改变送给模型的文本
+# （外置前 .py 里的 "\n" 是转义序列，不存在这个问题），故锁死 LF。
+# 只限定到本目录，不动仓内其他 .md（README 等不受影响）。
+app/prompts/*.md text eol=lf

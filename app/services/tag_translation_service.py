@@ -15,6 +15,7 @@ import structlog
 
 from app.ai.llm.deepseek_client import CircuitOpenError, get_client
 from app.core.constants import EXPERT_TAGS
+from app.prompts import load_prompt
 
 logger = structlog.get_logger(__name__)
 
@@ -54,7 +55,8 @@ async def translate_tags(description: str) -> tuple[list[str], str]:
     try:
         text = await get_client().chat(
             [
-                {"role": "system", "content": "你是专业领域标签匹配助手，严格从给定词表选择。"},
+                # 正文见 app/prompts/tag_match_system.md
+                {"role": "system", "content": load_prompt("tag_match_system")},
                 {"role": "user", "content": _build_prompt(description.strip())},
             ],
             temperature=0.3,

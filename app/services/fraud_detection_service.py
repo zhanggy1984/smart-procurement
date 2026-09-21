@@ -28,6 +28,7 @@ from app.core import neo4j
 from app.core.database import session_factory
 from app.models.bid_document import BidDocument, BidStatus
 from app.models.project import Lot
+from app.prompts import load_prompt
 from app.services import config_service
 
 logger = structlog.get_logger(__name__)
@@ -502,7 +503,8 @@ async def _llm_report(result: dict) -> str:
     try:
         text = await get_client().chat(
             [
-                {"role": "system", "content": "你是围串标检测报告撰写专家，输出严谨专业。"},
+                # 正文见 app/prompts/fraud_report_system.md
+                {"role": "system", "content": load_prompt("fraud_report_system")},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.3,
