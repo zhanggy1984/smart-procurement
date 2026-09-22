@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-LOGIN_URL = "/api/v1/auth/login"
+LOGIN_URL = "/api/auth/login"
 
 
 async def _login(client, username: str, password: str):
@@ -87,7 +87,7 @@ async def test_refresh_returns_new_access(client):
     """refresh_token → 新 access_token。"""
     login = await _login(client, "admin", "Smart@2026")
     refresh = login.json()["refresh_token"]
-    resp = await client.post("/api/v1/auth/refresh", json={"refresh_token": refresh})
+    resp = await client.post("/api/auth/refresh", json={"refresh_token": refresh})
     assert resp.status_code == 200
     assert resp.json()["access_token"]
 
@@ -95,7 +95,7 @@ async def test_refresh_returns_new_access(client):
 @pytest.mark.asyncio
 async def test_refresh_invalid_token_401(client):
     """无效 refresh_token → 401。"""
-    resp = await client.post("/api/v1/auth/refresh", json={"refresh_token": "not-a-token"})
+    resp = await client.post("/api/auth/refresh", json={"refresh_token": "not-a-token"})
     assert resp.status_code == 401
 
 
@@ -138,11 +138,11 @@ async def test_refresh_rotates_and_old_token_rejected(client):
     """refresh 轮换：首次换新返还新 refresh_token；旧 refresh 二次使用 → 401。"""
     login = await _login(client, "admin", "Smart@2026")
     refresh = login.json()["refresh_token"]
-    r1 = await client.post("/api/v1/auth/refresh", json={"refresh_token": refresh})
+    r1 = await client.post("/api/auth/refresh", json={"refresh_token": refresh})
     assert r1.status_code == 200
     assert r1.json()["access_token"]
     assert r1.json().get("refresh_token")  # 轮换返还新 refresh_token
-    r2 = await client.post("/api/v1/auth/refresh", json={"refresh_token": refresh})
+    r2 = await client.post("/api/auth/refresh", json={"refresh_token": refresh})
     assert r2.status_code == 401
     assert "已失效" in r2.json()["detail"]
 
@@ -156,14 +156,14 @@ async def test_refresh_reuse_revokes_all_user_tokens(client):
     """
     login = await _login(client, "admin", "Smart@2026")
     refresh1 = login.json()["refresh_token"]
-    r1 = await client.post("/api/v1/auth/refresh", json={"refresh_token": refresh1})
+    r1 = await client.post("/api/auth/refresh", json={"refresh_token": refresh1})
     assert r1.status_code == 200
     refresh2 = r1.json()["refresh_token"]
     # 复用旧 refresh1 → 泄露信号 → 撤销 admin 全部 refresh token
-    r2 = await client.post("/api/v1/auth/refresh", json={"refresh_token": refresh1})
+    r2 = await client.post("/api/auth/refresh", json={"refresh_token": refresh1})
     assert r2.status_code == 401
     # refresh2（轮换新发的令牌）一并被吊销 → 401
-    r3 = await client.post("/api/v1/auth/refresh", json={"refresh_token": refresh2})
+    r3 = await client.post("/api/auth/refresh", json={"refresh_token": refresh2})
     assert r3.status_code == 401
     assert "已失效" in r3.json()["detail"]
 
@@ -172,17 +172,17 @@ async def test_refresh_reuse_revokes_all_user_tokens(client):
 async def test_change_password_flow(client, exp_headers):
     """改密：旧密码错误 400；正确 → 200；新密码可登录。"""
     r_bad = await client.post(
-        "/api/v1/auth/change-password", headers=exp_headers,
+        "/api/auth/change-password", headers=exp_headers,
         json={"old_password": "Wrong@999", "new_password": "New@Pass123"},
     )
     assert r_bad.status_code == 400
     r_weak = await client.post(
-        "/api/v1/auth/change-password", headers=exp_headers,
+        "/api/auth/change-password", headers=exp_headers,
         json={"old_password": "Smart@2026", "new_password": "weak"},
     )
     assert r_weak.status_code == 400  # 复杂度不达标
     r_ok = await client.post(
-        "/api/v1/auth/change-password", headers=exp_headers,
+        "/api/auth/change-password", headers=exp_headers,
         json={"old_password": "Smart@2026", "new_password": "New@Pass123"},
     )
     assert r_ok.status_code == 200
@@ -220,7 +220,7 @@ async def test_must_change_password_blocks_business_api(client):
 
     # 改密端点本身豁免（否则永远改不了密码）
     r_change = await client.post(
-        "/api/v1/auth/change-password", headers=headers,
+        "/api/auth/change-password", headers=headers,
         json={"old_password": "Smart@2026", "new_password": "New@Pass123"},
     )
     assert r_change.status_code == 200

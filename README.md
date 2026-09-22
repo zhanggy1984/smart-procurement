@@ -7,7 +7,7 @@
 - **做什么**：把招标评标从"人工翻阅数百页标书 + 十余维度逐一打分"变成"AI 逐维度预评分 + 专家确认修正"。投标、围串标检测、专家匹配与回避、AI 评审、汇总定标、归档留痕全流程在一个系统里闭环。
 - **怎么做**：RAG 检索 + DeepSeek 大模型逐维度**流式辅助评分**（SSE 标准契约，附检索证据原文）；Neo4j 知识图谱推理 4 类利益冲突；文本语义 + 关系图谱 + 报价集中度三路围串标检测；outbox 事件保证 MySQL → Neo4j 最终一致。整个后端按**「交互层 → 控制层 → 能力层 → 资源层」四层单向依赖**组织（依赖规则与当前收敛状态见[第二章](#二系统架构)）。
 - **可观测闭环**：接入统一**可观测 SDK**——每条业务链路落结构化事件（`trace_id` / `seq` / `interface` / `status` / `error_type` / `duration_ms` / `usage`，usage 真实透出不估算），埋点走旁路、失败不阻断业务主链路；并与评测平台双向契约：**出**是暴露标准契约清单供平台自动发现，**入**是错误事件回流后自动聚类成回归用例、再由平台回推触发本仓回归 → **线上出过的错会被自动固化成回归用例**。
-- **好在哪**：评审周期从周级降到天级、冲突关系 100% 召回、围串标高风险一票否决、全链路留痕可审计；AI 故障按级降级不阻塞评审；335 项单元测试 + 118 项集成测试 + 6 条浏览器级 E2E 全绿，CI 三层门禁守护。
+- **好在哪**：评审周期从周级降到天级、冲突关系 100% 召回、围串标高风险一票否决、全链路留痕可审计；AI 故障按级降级不阻塞评审；383 项单元测试 + 119 项集成测试 + 7 条浏览器级 E2E 全绿，CI 三层门禁守护。
 
 ## 目录
 
@@ -358,7 +358,7 @@ LOT-007 示例场景：SUP-012/013 同一实控人 → 综合 **HIGH 59.2** → 
 
 ### 11. 工程化质量
 - **CI 三层门禁**（2026-08-28 落地）：L0 lint（ruff F-only，scope=app+tests+scripts）+ L0 build（前端 npm build）+ L1 unit（`pytest tests/unit -m "not external"`，离线全绿，CI 无 secrets）；
-- **测试**：单元 335 项 / 集成 118 项 / 浏览器 E2E 6 条全绿；
+- **测试**：单元 383 项 / 集成 119 项 / 浏览器 E2E 7 条全绿；
 - **质量基准**：RAG / AI 评分 / 意图识别三大基准全达标（真实 DeepSeek）；
 - **SLA 压测**：核心链路 **8/8 达标**（标书解析 P50 52s、AI 完整流 5.6s、登录 0.06s、围串标检测 0.05s…）。
 
@@ -487,7 +487,7 @@ smart-procurement/
 │   ├── accept_p*.py                  # 各阶段 API 验收脚本
 │   ├── verify_sp_e2e.py              # SSE 标准契约容器内验证（19/19）
 │   └── benchmark_p75/                # RAG/AI 评分/意图质量基准
-├── tests/                      # 单元(unit 335) + 集成(integration 118) + E2E(6)
+├── tests/                      # 单元(unit 383) + 集成(integration 119) + E2E(7)
 ├── alembic/                    # 数据库迁移
 ├── .github/workflows/ci.yml    # CI 三层门禁（L0 lint + L0 build + L1 unit）
 ├── docker-compose.yml          # 应用容器编排（app/worker/nginx，中间件走共享 infra）
@@ -507,9 +507,9 @@ smart-procurement/
 
 | 层 | 内容 | 说明 |
 |----|------|------|
-| 单元测试 | `tests/unit/` **335 项** | 纯函数级，不依赖外部服务；含 `test_chat_agent.py`（四层门面语义）、`test_agent_loop.py`（编排）、`test_agent_tools.py`（能力层）、`test_retriever.py`（三路召回）、`test_deepseek_client.py`（断路器）、`test_conversation_service.py`（对话存储）等 |
-| 集成测试 | `tests/integration/` **118 项** | 真实中间件（MySQL/Neo4j/Milvus/MinIO/Redis）+ mock LLM；API 成功/错误路径、跨存储一致性、降级链路、SSE 契约（含 chat/score 三发对齐、幂等 422、缓存重放） |
-| 浏览器 E2E | `tests/e2e/` **6 条** | Playwright 真实容器（nginx:18080）：正常评审全链路至定标、冲突回避、围串标初筛、AI 降级切纯人工、黑名单级联废标、替补匹配 |
+| 单元测试 | `tests/unit/` **383 项** | 纯函数级，不依赖外部服务；含 `test_chat_agent.py`（四层门面语义）、`test_agent_loop.py`（编排）、`test_agent_tools.py`（能力层）、`test_retriever.py`（三路召回）、`test_deepseek_client.py`（断路器）、`test_conversation_service.py`（对话存储）等 |
+| 集成测试 | `tests/integration/` **119 项** | 真实中间件（MySQL/Neo4j/Milvus/MinIO/Redis）+ mock LLM；API 成功/错误路径、跨存储一致性、降级链路、SSE 契约（含 chat/score 三发对齐、幂等 422、缓存重放） |
+| 浏览器 E2E | `tests/e2e/` **7 条** | Playwright 真实容器（nginx:18080）：正常评审全链路至定标、冲突回避、围串标初筛、AI 降级切纯人工、黑名单级联废标、替补匹配、AI 辅助评分真实 LLM 支路 |
 | 契约验证 | `scripts/verify_sp_e2e.py` | 容器内运行时读真实 SSE 事件流，断言 meta 首帧 / tool_call(knowledge_retrieval) / reasoning/answer/thought 三发对齐 / done 收尾 / usage 正 / answer 拼接 == done.content（19/19） |
 | CI 门禁 | `.github/workflows/ci.yml` | 三层：L0 lint（ruff F-only，scope=app+tests+scripts）+ L0 build（前端 npm build）+ L1 unit（离线全绿）；PR 到 main + push main/dev 触发，无 secrets |
 | 质量基准 | `scripts/benchmark_p75/` | RAG（Recall@5/MRR/拒答）/ AI 评分 / 意图识别三大基准（真实 DeepSeek） |
@@ -518,9 +518,9 @@ smart-procurement/
 运行全部测试：
 
 ```bash
-poetry run pytest tests/unit -p no:html -p no:metadata        # 单元（335，离线）
-poetry run pytest tests/integration -p no:html -p no:metadata # 集成（118，需容器）
-poetry run pytest tests/e2e -p no:html -p no:metadata -m e2e  # 浏览器 E2E（6，需容器+前端构建）
+poetry run pytest tests/unit -p no:html -p no:metadata        # 单元（383，离线）
+poetry run pytest tests/integration -p no:html -p no:metadata # 集成（119，需容器）
+poetry run pytest tests/e2e -p no:html -p no:metadata -m e2e  # 浏览器 E2E（7，需容器+前端构建）
 ```
 
 ---
@@ -549,7 +549,7 @@ poetry run uvicorn app.main:app --reload --port 18002  # 本地热重载 API
 
 ### 跑测试 / 验收
 - 各阶段验收脚本 `scripts/accept_p*.py`（`poetry run python scripts/accept_p51_api.py` 等），幂等可重跑；
-- 提交前先跑 `pytest tests/unit`，确保不破坏既有 335 项。
+- 提交前先跑 `pytest tests/unit`，确保不破坏既有 383 项。
 
 ### 新增 API
 - models → schemas → services → api/v1 路由 → router 注册到 `main.py` → 验收脚本；
