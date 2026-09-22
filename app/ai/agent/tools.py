@@ -4,7 +4,7 @@ good-question 二期 function calling 架构移植，smart-procurement 决策空
 内部能力（外部能力全由内部服务承载，无跨系统 API 调用）：
 - retrieve_knowledge：问标书正文 → RAG 检索（唯一可能降级的外部依赖，error 兜底）
 - get_dimension_rubric：问评分标准 → 查 ScoringCriterion（无 IO 风险，本地数据）
-- get_bid_structured_info：问结构化数据（报价/资质/团队/工期）→ bid 字段 + structured_data
+- get_bid_structured_info：问结构化数据（工期/团队/资质/质保期）→ bid 字段 + structured_data
 
 评分端点不 agent 化（必须检索 + 报价公式是确定性数学，无决策空间，方案评审结论）。
 执行器返回 dict 直接作为 tool 消息 content（JSON 序列化，LLM 消费）；source_count 统一
@@ -96,8 +96,8 @@ GET_BID_STRUCTURED_INFO_TOOL = {
     "function": {
         "name": "get_bid_structured_info",
         "description": (
-            "获取投标文件的结构化信息（报价金额、工期、团队规模、资质证书等结构化字段）。"
-            "用户询问价格、报价、金额、工期、团队、人员、资质、认证等数据型问题时调用。"
+            "获取投标文件的结构化信息（工期、团队规模、资质证书等结构化字段）。"
+            "用户询问工期、团队、人员、资质、认证等数据型问题时调用。"
             "工具返回 JSON：fields（字段名→值，JSON 序列化）、source_count（字段条数）。"
             "field 缺省返回全部结构化字段。"
         ),
@@ -106,7 +106,7 @@ GET_BID_STRUCTURED_INFO_TOOL = {
             "properties": {
                 "field": {
                     "type": "string",
-                    "description": "可选。要查询的字段名（如 报价/工期/团队规模/资质）。缺省返回全部结构化字段。",
+                    "description": "可选。要查询的字段名（中文键：工期/团队规模；英文键：quality_cert/warranty_months）。缺省返回全部结构化字段。",
                 },
             },
             "required": [],
@@ -181,12 +181,13 @@ def _match_field(fields: dict, field: str) -> Optional[str]:
 
 
 async def execute_get_bid_structured_info(ctx: ToolContext, field: str | None = None) -> dict:
-    """get_bid_structured_info：标书结构化数据（报价/工期/团队 + structured_data 兜底）。"""
+    """get_bid_structured_info：标书结构化数据（工期/团队 + structured_data 兜底）。"""
     bid = ctx.bid
     if bid is None:
         return {"error": "标书不存在"}
+    # 刻意不返回报价：报价评审走确定性公式（review_service._calc_price_formula），
+    # AI 对话不参与报价作答（评分端点不 agent 化的同一条决策）。加回该字段前先看评测 case 3169。
     fields: dict = {
-        "报价金额": str(bid.bid_amount) if bid.bid_amount else None,
         "工期": bid.duration,
         "团队规模": bid.team_size,
     }
