@@ -13,9 +13,12 @@ MySQL 使用独立 test schema（smart_procurement_test，根 conftest 已切换
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
+import time
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -64,30 +67,63 @@ def pytest_collection_modifyitems(items):
 # ==================== 建库 + 建表（session 级） ====================
 
 
+# 共享 MySQL 经 Docker Desktop 端口转发访问，实测存在秒级「坏窗口」：建连即断，
+# asyncmy 抛 2013 OperationalError。_prepare_test_db 是 session 级、全会话只执行一次，
+# 一次抖动就会让全部用例 error（实测 119/119 全红，约占 1/4 运行）。
+#
+# 故对**建连**做有限次退避重试。这不算掩盖问题：此处两个动作都是幂等准备
+# （CREATE DATABASE IF NOT EXISTS / alembic upgrade head），重试语义正确；且只覆盖
+# 这一处，**测试体内的失败照旧原样抛出**，信号不丢。重试发生时 warn，保持可见。
+_RETRY_ATTEMPTS = 3
+
+
+def _backoff(attempt: int) -> float:
+    """第 1、2 次失败后分别等 1s、2s。"""
+    return float(2 ** (attempt - 1))
+
+
 async def _ensure_test_db() -> None:
     """幂等创建 test 库并授权 smart 用户。"""
     from sqlalchemy import text
+    from sqlalchemy.exc import OperationalError
     from sqlalchemy.ext.asyncio import create_async_engine
 
-    eng = create_async_engine(_ROOT_URL, pool_pre_ping=True)
-    try:
-        async with eng.begin() as conn:
-            await conn.execute(text(f"CREATE DATABASE IF NOT EXISTS `{TEST_DB}` CHARACTER SET utf8mb4"))
-            await conn.execute(text(f"GRANT ALL PRIVILEGES ON `{TEST_DB}`.* TO 'smart'@'%'"))
-            await conn.execute(text("FLUSH PRIVILEGES"))
-    finally:
-        await eng.dispose()
+    for attempt in range(1, _RETRY_ATTEMPTS + 1):
+        eng = create_async_engine(_ROOT_URL, pool_pre_ping=True)
+        try:
+            async with eng.begin() as conn:
+                await conn.execute(text(f"CREATE DATABASE IF NOT EXISTS `{TEST_DB}` CHARACTER SET utf8mb4"))
+                await conn.execute(text(f"GRANT ALL PRIVILEGES ON `{TEST_DB}`.* TO 'smart'@'%'"))
+                await conn.execute(text("FLUSH PRIVILEGES"))
+            return
+        except OperationalError as e:
+            if attempt == _RETRY_ATTEMPTS:
+                raise
+            warnings.warn(
+                f"[itest] 建 test 库失败（第 {attempt}/{_RETRY_ATTEMPTS} 次），"
+                f"{_backoff(attempt)}s 后重试：{e}", stacklevel=1)
+            await asyncio.sleep(_backoff(attempt))
+        finally:
+            await eng.dispose()
 
 
 def _run_alembic() -> None:
     """用指向 test schema 的 MYSQL_URL 跑 alembic upgrade head（已升级则 no-op）。"""
     env = {**os.environ, "MYSQL_URL": DB_URL}
-    res = subprocess.run(
-        [sys.executable, "-m", "alembic", "upgrade", "head"],
-        cwd=ROOT, env=env, capture_output=True, text=True,
-    )
-    if res.returncode != 0:
-        raise RuntimeError(f"alembic upgrade head 失败:\n{res.stdout}\n{res.stderr}")
+    for attempt in range(1, _RETRY_ATTEMPTS + 1):
+        res = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            cwd=ROOT, env=env, capture_output=True, text=True,
+        )
+        if res.returncode == 0:
+            return
+        # 迁移本身有错时重试无意义，但三次后照样抛出（不会把真错误吞成通过）。
+        if attempt == _RETRY_ATTEMPTS:
+            raise RuntimeError(f"alembic upgrade head 失败:\n{res.stdout}\n{res.stderr}")
+        warnings.warn(
+            f"[itest] alembic upgrade head 失败（第 {attempt}/{_RETRY_ATTEMPTS} 次），"
+            f"{_backoff(attempt)}s 后重试：{res.stderr.strip()[-300:]}", stacklevel=1)
+        time.sleep(_backoff(attempt))
 
 
 @pytest.fixture(scope="session", autouse=True)
