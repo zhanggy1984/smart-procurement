@@ -24,7 +24,12 @@ from datetime import datetime, timezone
 import pytest
 
 BASE_URL = os.environ.get("E2E_BASE_URL", "http://localhost:8080")
-PASSWORD = "Smart@2026"
+# E2E 账号统一口令 = app 侧导入建号口令（expert_service.py:32 / supplier_service.py:38 的
+# INITIAL_PASSWORD），也与运行栈演示账号一致（登录页提示「演示账号（密码均为 123456）」）。
+# 原先写的 "Smart@2026" 是 scripts/synthetic/generators.py 的**合成数据集**常量——E2E 走的是
+# /experts/import、/suppliers/import 建号路径，产品在那里发的是 123456，两者对不上，
+# 于是 fixture 建/导入的账号登录必然失败。此处对齐产品实际值，不引入第二套口令约定。
+PASSWORD = "123456"
 PREFIX = "E2E"
 
 # 连主库（sp-app 真实数据）。用 root 保证清理权限。
@@ -119,8 +124,36 @@ def _execute(sql: str, params: dict | None = None) -> None:
 # ==================== 预置管理员/项目经理 ====================
 
 
+def clear_first_login_gate(usernames) -> None:
+    """把账号标记为「已完成首登改密」（users.must_change_password = 0）。
+
+    为什么需要：自查 #6（58b4ad7）给 users 加了 must_change_password（建号时显式写 True：
+    expert_service.py:160 / supplier_service.py:175），未改密账号除改密端点外业务 API
+    一律 403（app/api/deps.py:58）。E2E 要用的是「可调业务 API」的账号，故进使用路径即清。
+
+    调用点只有两处，都在 conftest 的「取用账号」收口上：`login`（UI 表单）与 `Api.__init__`
+    （HTTP 直连）。**刻意不放在导入工厂里**——导入工厂只覆盖 /experts/import、/suppliers/import
+    两条 API 路径，而 E2E-1/E2E-2 走的是 /admin/experts、/admin/suppliers **UI 上传页**，
+    根本经过不了工厂；放在工厂里会漏，且每加一条导入路径就要再补一次。
+
+    为什么直接改库而不是走 /api/auth/change-password：该端点要求新密码满足复杂度
+    （≥8 位 + 大小写 + 数字，app/core/security.py:54），而产品导入口令 123456 不满足，
+    拿它当新密码必然 400；改写成 fixture 自定的强口令，又会造出「测试账号口令 ≠ 产品
+    导入口令」的第二套约定，下次产品改口令时同样静默失效。同款「建号即置 0」做法见
+    scripts/import_synthetic_mysql.py + scripts/synthetic/generators.py（合成演示账号
+    显式写 must_change_password=False，注释即「防旧 JSON 缺省」）。
+    """
+    for username in usernames:
+        _sql("UPDATE users SET must_change_password = 0 WHERE username = :u", {"u": username})
+
+
 def _seed_admin_pm() -> None:
-    """预置 admin + pm 登录账号（专家/供应商由各流导入自动建号）。"""
+    """预置 admin + pm 登录账号（专家/供应商由各流导入自动建号）。
+
+    must_change_password 显式写 0：本函数造的是驱动业务流程的**预置账号**（语义=
+    「已入职用户」），不是走首登改密流程的新账号；不写就取列默认 1，随后所有业务 API
+    都会被 403 拦死。语义与 scripts/synthetic/generators.py 的合成演示账号一致。
+    """
     from app.core.security import hash_password  # 复用项目 hash（bcrypt，与后端一致）
 
     now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -132,8 +165,8 @@ def _seed_admin_pm() -> None:
     for user_id, username, role, display in rows:
         _execute(
             "INSERT IGNORE INTO users (user_id, username, password_hash, role, display_name, "
-            "email, is_active, created_at, updated_at) "
-            "VALUES (:uid, :u, :h, :r, :d, NULL, 1, :now, :now)",
+            "email, is_active, must_change_password, created_at, updated_at) "
+            "VALUES (:uid, :u, :h, :r, :d, NULL, 1, 0, :now, :now)",
             {"uid": user_id, "u": username, "h": h, "r": role, "d": display, "now": now},
         )
 
@@ -330,6 +363,7 @@ def _seed_and_cleanup_after_test():
 
 def login(page, username: str, password: str = PASSWORD) -> None:
     """走真实登录表单，登录成功（localStorage 落 token）。"""
+    clear_first_login_gate([username])  # E2E 把账号当「已入职」用（见该函数 docstring）
     page.goto(f"{BASE_URL}/login")
     page.get_by_placeholder("请输入用户名").fill(username)
     page.get_by_placeholder("请输入密码").fill(password)
@@ -350,7 +384,10 @@ class Api:
         # trust_env=False：本机 WinINET 系统代理(127.0.0.1:15490)会被 httpcore 读走，
         # 劫持 localhost:18080 请求致 502/10054；E2E 直连本地部署，禁用系统代理。
         self._client = httpx.Client(base_url=BASE_URL, timeout=60, trust_env=False)
-        r = self._client.post("/api/v1/auth/login", json={"username": username, "password": password})
+        clear_first_login_gate([username])  # E2E 把账号当「已入职」用（见该函数 docstring）
+        # 登录路由 /api/auth/login（不带 v1）：T15 e65b437 起 auth 单独挂 /api，
+        # app/api/v1/__init__.py 注释「auth 不再挂 /api/v1」。业务端点仍是 /api/v1（见 request()）。
+        r = self._client.post("/api/auth/login", json={"username": username, "password": password})
         assert r.status_code == 200, f"登录失败 {username}: {r.text}"
         self.token = r.json()["access_token"]
         self.headers = {"Authorization": f"Bearer {self.token}"}

@@ -2,7 +2,8 @@
 
 - 文件生成：专家/供应商 Excel、冲突 CSV、可解析中文标书 PDF（reportlab STSong，
   验证过 pdfplumber 提取 + RE_AMOUNT 正则命中）
-- 导入工厂：API 上传 Excel/CSV（导入自动建登录账号，password=Smart@2026）
+- 导入工厂：API 上传 Excel/CSV（导入自动建登录账号，初始口令取 conftest 里的常量；
+  账号的首登强改标记由 conftest.login / conftest.Api 在取用时统一清，见 clear_first_login_gate）
 - 账号解析：专家按 expert.user_id join users；供应商按 users.display_name=supplier.name
 - 项目工厂：API 建 项目→标段→5 维度（权重和 1.0）→专家遴选参数
 - 投标工厂：API 上传可解析 PDF
@@ -130,19 +131,19 @@ def make_bid_pdf(*, amount: str = "1,234,567", amount_unit: str = "元", pages: 
 
 
 def import_experts(api, rows: list[dict]) -> None:
-    r = api.post("/experts/import", files={
+    resp = api.post("/experts/import", files={
         "file": ("experts.xlsx", make_expert_excel(rows),
                  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
-    assert r.status_code == 201, f"专家导入失败: {r.text}"
-    assert r.json()["imported"] == len(rows), r.text
+    assert resp.status_code == 201, f"专家导入失败: {resp.text}"
+    assert resp.json()["imported"] == len(rows), resp.text
 
 
 def import_suppliers(api, rows: list[dict]) -> None:
-    r = api.post("/suppliers/import", files={
+    resp = api.post("/suppliers/import", files={
         "file": ("suppliers.xlsx", make_supplier_excel(rows),
                  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
-    assert r.status_code == 201, f"供应商导入失败: {r.text}"
-    assert r.json()["imported"] == len(rows), r.text
+    assert resp.status_code == 201, f"供应商导入失败: {resp.text}"
+    assert resp.json()["imported"] == len(rows), resp.text
 
 
 def import_conflicts(api, rows: list[dict]) -> None:
