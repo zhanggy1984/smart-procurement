@@ -188,13 +188,13 @@ async def test_get_dimension_rubric_none_dim():
 
 @pytest.mark.asyncio
 async def test_get_bid_structured_info():
-    """结构化数据：标量字段 + structured_data 合并。"""
+    """结构化数据：标量字段 + structured_data 合并；报价刻意不返回（报价走确定性公式）。"""
     bid = MagicMock(bid_amount=100.0, duration=30, team_size=10, structured_data={"CMMI3": True})
     out = await execute_get_bid_structured_info(_ctx(bid=bid))
-    assert out["fields"]["报价金额"] == "100.0"
+    assert "报价金额" not in out["fields"]  # 回归锁：报价不得经 AI 对话透出（评测 case 3169）
     assert out["fields"]["工期"] == 30
     assert out["fields"]["CMMI3"] is True
-    assert out["source_count"] == 4
+    assert out["source_count"] == 3
 
 
 @pytest.mark.asyncio
@@ -209,3 +209,7 @@ async def test_get_bid_structured_info_field_filter():
     # 未匹配字段 → error
     out2 = await execute_get_bid_structured_info(_ctx(bid=bid), field="不存在的字段")
     assert "error" in out2
+    # 报价不是可查字段：必须明确报"未找到"，不得模糊匹配到别的字段蒙混过去
+    out3 = await execute_get_bid_structured_info(_ctx(bid=bid), field="报价")
+    assert out3["fields"] == {}
+    assert "error" in out3
