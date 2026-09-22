@@ -366,12 +366,30 @@ def _seed_and_cleanup_after_test():
 def login(page, username: str, password: str = PASSWORD) -> None:
     """走真实登录表单，登录成功（localStorage 落 token）。"""
     clear_first_login_gate([username])  # E2E 把账号当「已入职」用（见该函数 docstring）
+    # 诊断挂点（2026-09-22 排查用）：现象是登录 POST 返回 200、sp_token 已落 localStorage，
+    # 但页面停在 /login 不跳转、也不再发任何请求。收集浏览器 console/pageerror，失败时打印。
+    _diag: list[str] = []
+    page.on("console", lambda m: _diag.append(f"console.{m.type}: {m.text}"))
+    page.on("pageerror", lambda e: _diag.append(f"pageerror: {e}"))
     page.goto(f"{BASE_URL}/login")
     page.get_by_placeholder("请输入用户名").fill(username)
     page.get_by_placeholder("请输入密码").fill(password)
     page.get_by_role("button", name=re.compile("登")).click()
-    page.wait_for_function("() => localStorage.getItem('sp_token') !== null", timeout=15000)
-    page.wait_for_load_state("networkidle")
+    try:
+        page.wait_for_function("() => localStorage.getItem('sp_token') !== null", timeout=15000)
+        # 原为 wait_for_load_state("networkidle")，2026-09-22 改。networkidle 的语义是「500ms
+        # 内无任何网络连接」，本应用有持续后台轮询，可能永远达不到 idle。换成真正的完成信号：
+        # 登录成功后 router 会离开 /login。
+        page.wait_for_function("() => !location.pathname.startsWith('/login')", timeout=15000)
+    except Exception:
+        print("\n===LOGIN DIAG===")
+        print("url:", page.url)
+        print("storage:", page.evaluate("() => JSON.stringify(localStorage)"))
+        print("diag log:")
+        for line in _diag[-40:]:
+            print("  ", line)
+        print("===END LOGIN DIAG===")
+        raise
 
 
 # ==================== API client（数据准备/校验用） ====================
