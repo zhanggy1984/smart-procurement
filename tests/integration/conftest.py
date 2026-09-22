@@ -25,8 +25,23 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-TEST_DB = os.environ.get("MYSQL_DATABASE", "smart_procurement_test")
-DB_URL = os.environ["MYSQL_URL"]
+# 集成测试一律打独立 test schema：此处**强制重建**连接串并写回环境变量，不信任外部注入。
+# 根 conftest 原先的 setdefault 只在未预置 MYSQL_URL 时生效，而本仓 .env 的 MYSQL_URL
+# 指向真实库 smart_procurement —— 调用方一旦 source .env，守卫即失效，_reset_state 的
+# TRUNCATE 会打在演示主库上。故显式覆盖 + 断言，不做静默改写。
+TEST_DB = os.environ.get("MYSQL_TEST_DATABASE", "smart_procurement_test")
+if not TEST_DB.endswith("_test"):
+    raise RuntimeError(
+        f"集成测试库名必须以 _test 结尾（实际为 {TEST_DB!r}）：拒绝在非测试库上执行 TRUNCATE"
+    )
+DB_URL = (
+    f"mysql+asyncmy://{os.environ.get('MYSQL_USER', 'smart')}"
+    f":{os.environ.get('MYSQL_PASSWORD', 'smart_procurement_dev')}"
+    f"@{os.environ.get('MYSQL_HOST', 'localhost')}"
+    f":{os.environ.get('MYSQL_PORT', '33061')}/{TEST_DB}"
+)
+os.environ["MYSQL_URL"] = DB_URL
+os.environ["MYSQL_DATABASE"] = TEST_DB
 
 # root 建库连接串参数化：本地默认共享 infra（宿主 33061），CI 经 MYSQL_TEST_ROOT_URL
 # 覆盖（GitHub Actions mysql service 默认暴露 localhost:3306）。

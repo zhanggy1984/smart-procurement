@@ -1,32 +1,23 @@
-"""测试根 conftest：在导入任何 app 模块前把 DB 指向集成测试专用 schema。
+"""测试根 conftest：只负责给依赖外部服务的用例打 external 标记。
 
-app/core/database.py 的 engine 是模块级单例，连接串在 import 时锁定。统一
-指向 smart_procurement_test（P7.3 集成测试），确保测试进程绝不触碰演示主库
-smart_procurement。单元测试用 mock 不真连库，指向 test schema 无副作用。
+**不再在此处设置 MYSQL_URL**（2026-09-22 改）。原先用 os.environ.setdefault
+把 DB 指向集成测试专用 schema，而 setdefault **只在未预置 MYSQL_URL 时生效**：
+本仓 .env 的 MYSQL_URL 指向真实库 smart_procurement，调用方一旦 source .env
+（原 scripts/run_e2e.sh 就是这么干的），守卫即失效，integration 的
+_reset_state 会 TRUNCATE 演示主库。
 
-与 tests/integration/conftest.py 保持同源（root 账号密码来自 .env）。
+路由权已下放到各子目录 conftest：integration 强制指向 *_test 库并断言库名后缀，
+不允许被外部环境改写。单元测试用 mock 不真连库，不设亦无副作用。
+
+（注：e2e/conftest.py 的连库参数走 MYSQL_PORT + MYSQL_ROOT_PASSWORD，**不读
+MYSQL_URL**，故本次改动与 E2E 无关；该文件里那个名为 MYSQL_DSN 的变量是死变量，
+全仓无读取方。）
 """
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
-# 外部依赖地址参数化：本地默认指向共享 infra（宿主 33061），CI 用 GitHub Actions
-# services 时经 env 覆盖（MYSQL_HOST=localhost / MYSQL_PORT=3306，或直接设 MYSQL_URL
-# 全串）。e2e 的宿主端口重映射（13306）也在 e2e/conftest 单独参数化，互不干扰。
-_MYSQL_USER = os.environ.get("MYSQL_USER", "smart")
-_MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD", "smart_procurement_dev")
-_MYSQL_HOST = os.environ.get("MYSQL_HOST", "localhost")
-_MYSQL_PORT = os.environ.get("MYSQL_PORT", "33061")
-TEST_DATABASE = os.environ.get("MYSQL_DATABASE", "smart_procurement_test")
-
-os.environ.setdefault(
-    "MYSQL_URL",
-    f"mysql+asyncmy://{_MYSQL_USER}:{_MYSQL_PASSWORD}@{_MYSQL_HOST}:{_MYSQL_PORT}/{TEST_DATABASE}",
-)
-os.environ.setdefault("MYSQL_DATABASE", TEST_DATABASE)
 
 
 def pytest_collection_modifyitems(items):

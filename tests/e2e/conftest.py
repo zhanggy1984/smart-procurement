@@ -33,9 +33,11 @@ PASSWORD = "123456"
 PREFIX = "E2E"
 
 # 连主库（sp-app 真实数据）。用 root 保证清理权限。
-MYSQL_DSN = os.environ.get(
-    "MYSQL_URL", "mysql+asyncmy://smart:smart_procurement_dev@localhost:3306/smart_procurement"
-)
+#
+# 此处原有一个 MYSQL_DSN 常量（读 MYSQL_URL，缺省拼主库 DSN），已于 2026-09-22 删除：
+# 它是**死变量**，全仓无读取方，实际连库参数由下方 MYSQL_PORT + MYSQL_ROOT_PASSWORD
+# 决定（见 _sql）。留着它会让人以为 E2E 的库地址由 MYSQL_URL 控制——已被误导过一次。
+#
 # 宿主 MySQL 端口（同机多栈冲突时经 .env 重映射为 13306，故参数化）
 MYSQL_PORT = int(os.environ.get("MYSQL_PORT", "3306"))
 
